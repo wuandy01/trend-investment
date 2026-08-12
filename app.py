@@ -7,7 +7,7 @@ import math
 
 import streamlit as st
 
-from src import backtest, charts, data_loader, strategies
+from src import backtest, charts, data_loader, screener, strategies
 
 st.set_page_config(page_title="趨勢投資回測系統", layout="wide")
 
@@ -26,6 +26,15 @@ def format_metric(key: str, value) -> str:
     if key == "交易次數":
         return f"{int(value)}"
     return str(value)
+
+
+def format_ranking_table(df):
+    display = df.copy()
+    display["訊號後漲幅"] = (display["訊號後漲幅"] * 100).round(2).astype(str) + "%"
+    display["進場日期"] = display["進場日期"].dt.date
+    display["現價"] = display["現價"].round(2)
+    display["進場價格"] = display["進場價格"].round(2)
+    return display
 
 
 def main() -> None:
@@ -123,7 +132,9 @@ def main() -> None:
     row2[2].metric("交易次數", format_metric("交易次數", m["交易次數"]))
     row2[3].metric("獲利因子", format_metric("獲利因子", m["獲利因子"]))
 
-    tab_chart, tab_equity, tab_trades = st.tabs(["技術分析圖", "權益曲線", "交易明細"])
+    tab_chart, tab_equity, tab_trades, tab_ranking = st.tabs(
+        ["技術分析圖", "權益曲線", "交易明細", "熱門強勢股排行"]
+    )
 
     with tab_chart:
         fig = charts.build_price_chart(result.data, strategy, result.trades, label)
@@ -142,8 +153,44 @@ def main() -> None:
             display_trades["報酬率"] = (display_trades["報酬率"] * 100).round(2).astype(str) + "%"
             display_trades["進場日期"] = display_trades["進場日期"].dt.date
             display_trades["出場日期"] = display_trades["出場日期"].dt.date
-            st.dataframe(display_trades, use_container_width=True, hide_index=True)
+            st.dataframe(display_trades, width="stretch", hide_index=True)
             st.caption("交易明細為進出場價格的原始報酬率（未扣除成本），整體績效指標已計入每次進出場成本。")
+
+    with tab_ranking:
+        n_tw = len(data_loader.POPULAR_TICKERS["台股"])
+        n_us = len(data_loader.POPULAR_TICKERS["美股"])
+        st.caption(
+            f"根據左側目前選擇的策略「{strategy.name}」與參數，分別掃描台股（{n_tw} 檔）與美股（{n_us} 檔）"
+            f"熱門標的，找出目前有進場訊號、且訊號後累積漲幅最高的前 10 名。"
+        )
+        scan_clicked = st.button("掃描熱門強勢股排行", key="scan_ranking")
+
+        if scan_clicked:
+            params_items = tuple(sorted(params.items()))
+            with st.spinner("掃描中，需下載多檔股票資料，請稍候..."):
+                st.session_state["ranking_result"] = {
+                    "strategy_name": strategy.name,
+                    "台股": screener.scan_market("台股", strategy_key, params_items, start_date, end_date),
+                    "美股": screener.scan_market("美股", strategy_key, params_items, start_date, end_date),
+                }
+
+        ranking_state = st.session_state.get("ranking_result")
+        if ranking_state is None:
+            st.info("點擊上方按鈕開始掃描（首次掃描需下載較多資料，可能需要數秒到數十秒）。")
+        else:
+            st.caption(f"掃描時使用的策略：{ranking_state['strategy_name']}")
+            for market in ["台股", "美股"]:
+                st.markdown(f"**{market}**")
+                ranking_df = ranking_state[market]
+                if ranking_df.empty:
+                    st.info(f"目前沒有{market}標的符合此策略的進場條件。")
+                else:
+                    st.dataframe(
+                        format_ranking_table(ranking_df),
+                        width="stretch",
+                        hide_index=True,
+                    )
+            st.caption("「訊號後漲幅」為自策略進場訊號觸發日起算至今的價格漲幅，僅代表目前訊號的强弱，不代表未來績效。")
 
 
 if __name__ == "__main__":

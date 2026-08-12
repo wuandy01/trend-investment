@@ -8,7 +8,7 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 
-# 常見股票清單，供下拉選單使用；使用者也可以自行輸入代碼。
+# 常見股票清單，供下拉選單與熱門強勢股掃描使用；使用者也可以自行輸入代碼。
 POPULAR_TICKERS = {
     "台股": {
         "2330.TW": "台積電",
@@ -23,6 +23,24 @@ POPULAR_TICKERS = {
         "3008.TW": "大立光",
         "0050.TW": "元大台灣50",
         "0056.TW": "元大高股息",
+        "2891.TW": "中信金",
+        "2886.TW": "兆豐金",
+        "1216.TW": "統一",
+        "2002.TW": "中鋼",
+        "2207.TW": "和泰車",
+        "2382.TW": "廣達",
+        "2357.TW": "華碩",
+        "3711.TW": "日月光投控",
+        "1303.TW": "南亞",
+        "6505.TW": "台塑化",
+        "2884.TW": "玉山金",
+        "2892.TW": "第一金",
+        "5880.TW": "合庫金",
+        "2880.TW": "華南金",
+        "2885.TW": "元大金",
+        "3034.TW": "聯詠",
+        "2379.TW": "瑞昱",
+        "2409.TW": "友達",
     },
     "美股": {
         "AAPL": "Apple",
@@ -37,6 +55,24 @@ POPULAR_TICKERS = {
         "QQQ": "Nasdaq 100 ETF",
         "VOO": "Vanguard S&P 500 ETF",
         "VTI": "Vanguard Total Market ETF",
+        "BRK-B": "Berkshire Hathaway",
+        "JPM": "JPMorgan Chase",
+        "V": "Visa",
+        "MA": "Mastercard",
+        "UNH": "UnitedHealth",
+        "HD": "Home Depot",
+        "PG": "Procter & Gamble",
+        "JNJ": "Johnson & Johnson",
+        "XOM": "ExxonMobil",
+        "COST": "Costco",
+        "ABBV": "AbbVie",
+        "MRK": "Merck",
+        "AMD": "AMD",
+        "NFLX": "Netflix",
+        "ADBE": "Adobe",
+        "CRM": "Salesforce",
+        "ORCL": "Oracle",
+        "BAC": "Bank of America",
     },
 }
 
@@ -87,6 +123,44 @@ def load_price_data(
     df = df[keep_cols].dropna(subset=["Close"])
     df.index.name = "Date"
     return df
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_universe_prices(
+    tickers: tuple[str, ...],
+    start_date: dt.date,
+    end_date: dt.date,
+) -> dict[str, pd.DataFrame]:
+    """一次批次下載多檔股票的歷史資料，回傳 {代碼: DataFrame}（下載失敗的代碼會被跳過）。"""
+    if not tickers:
+        return {}
+
+    raw = yf.download(
+        list(tickers),
+        start=start_date,
+        end=end_date + dt.timedelta(days=1),
+        auto_adjust=True,
+        progress=False,
+        group_by="ticker",
+        threads=True,
+    )
+
+    result: dict[str, pd.DataFrame] = {}
+    if raw is None or raw.empty:
+        return result
+
+    for ticker in tickers:
+        try:
+            sub = raw[ticker] if isinstance(raw.columns, pd.MultiIndex) else raw
+            sub = sub.rename(columns=str.title)
+            keep_cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in sub.columns]
+            sub = sub[keep_cols].dropna(subset=["Close"])
+            if not sub.empty:
+                sub.index.name = "Date"
+                result[ticker] = sub
+        except (KeyError, AttributeError):
+            continue
+    return result
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
