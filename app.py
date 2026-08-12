@@ -7,7 +7,7 @@ import math
 
 import streamlit as st
 
-from src import backtest, charts, data_loader, screener, strategies
+from src import backtest, charts, data_loader, fundamentals, kol_feed, screener, strategies
 
 st.set_page_config(page_title="趨勢投資回測系統", layout="wide")
 
@@ -37,9 +37,87 @@ def format_ranking_table(df):
     return display
 
 
-def main() -> None:
+def render_fundamentals_tab(ticker: str, currency: str, latest_close: float) -> None:
+    info = fundamentals.get_company_info(ticker)
+    if not info:
+        st.info("查無此股票的基本面資料。")
+        return
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("產業", info.get("sector") or "—")
+    col2.metric("市值", fundamentals.format_large_number(info.get("marketCap")))
+    employees = info.get("fullTimeEmployees")
+    col3.metric("員工人數", f"{employees:,}" if employees is not None else "—")
+
+    st.markdown("**關鍵比率**")
+    trailing_pe = info.get("trailingPE")
+    forward_pe = info.get("forwardPE")
+    price_to_book = info.get("priceToBook")
+    dividend_yield = info.get("dividendYield")
+    r1 = st.columns(4)
+    r1[0].metric("P/E (TTM)", f"{trailing_pe:.2f}" if trailing_pe is not None else "—")
+    r1[1].metric("P/E (預估)", f"{forward_pe:.2f}" if forward_pe is not None else "—")
+    r1[2].metric("P/B", f"{price_to_book:.2f}" if price_to_book is not None else "—")
+    r1[3].metric("股息率", f"{dividend_yield:.2f}%" if dividend_yield is not None else "—")
+
+    roe = info.get("returnOnEquity")
+    gross_margin = info.get("grossMargins")
+    revenue_growth = info.get("revenueGrowth")
+    debt_to_equity = info.get("debtToEquity")
+    r2 = st.columns(4)
+    r2[0].metric("ROE", f"{roe * 100:.1f}%" if roe is not None else "—")
+    r2[1].metric("毛利率", f"{gross_margin * 100:.1f}%" if gross_margin is not None else "—")
+    r2[2].metric("營收成長 (YoY)", f"{revenue_growth * 100:.1f}%" if revenue_growth is not None else "—")
+    r2[3].metric("負債/權益", f"{debt_to_equity:.1f}%" if debt_to_equity is not None else "—")
+
+    if info.get("longBusinessSummary"):
+        with st.expander("公司簡介"):
+            st.write(info["longBusinessSummary"])
+
+    st.divider()
+    statements = fundamentals.get_financial_statements(ticker)
+    stmt_income, stmt_balance, stmt_cashflow = st.tabs(["損益表", "資產負債表", "現金流量表"])
+    for tab, key, empty_msg in [
+        (stmt_income, "income", "查無損益表資料。"),
+        (stmt_balance, "balance", "查無資產負債表資料。"),
+        (stmt_cashflow, "cashflow", "查無現金流量表資料。"),
+    ]:
+        with tab:
+            table = fundamentals.format_statement_table(statements[key])
+            if table.empty:
+                st.info(empty_msg)
+            else:
+                st.dataframe(table, width="stretch")
+    st.caption("財報單位已自動換算為萬／億／兆，年度資料，最新一期在最左側。")
+
+    st.divider()
+    rec = fundamentals.get_recommendations(ticker)
+    target_mean = info.get("targetMeanPrice")
+    n_analysts = info.get("numberOfAnalystOpinions")
+    if not rec.empty or target_mean:
+        st.markdown("**分析師評等**")
+        if not rec.empty:
+            latest = rec.iloc[0]
+            rec_cols = st.columns(5)
+            for col, key, rec_label in zip(
+                rec_cols,
+                ["strongBuy", "buy", "hold", "sell", "strongSell"],
+                ["強力買進", "買進", "持有", "賣出", "強力賣出"],
+            ):
+                col.metric(rec_label, int(latest.get(key, 0)))
+        if target_mean:
+            diff_pct = (target_mean / latest_close - 1) * 100
+            st.caption(
+                f"分析師平均目標價：{currency}{target_mean:,.2f}"
+                f"（{n_analysts or '—'} 位分析師），與目前股價相差 {diff_pct:+.1f}%"
+            )
+    else:
+        st.info("查無分析師評等資料。")
+
+
+def render_backtest_page() -> None:
     st.title("趨勢投資回測系統")
-    st.caption("選擇股票、設定回測區間與策略參數，檢視技術分析圖與回測績效。")
+    st.caption("選擇股票、設定回測區間與策略參數，檢視技術分析圖、基本面與回測績效。")
 
     with st.sidebar:
         st.header("回測設定")
@@ -132,8 +210,8 @@ def main() -> None:
     row2[2].metric("交易次數", format_metric("交易次數", m["交易次數"]))
     row2[3].metric("獲利因子", format_metric("獲利因子", m["獲利因子"]))
 
-    tab_chart, tab_equity, tab_trades, tab_ranking = st.tabs(
-        ["技術分析圖", "權益曲線", "交易明細", "熱門強勢股排行"]
+    tab_chart, tab_equity, tab_trades, tab_ranking, tab_fundamentals = st.tabs(
+        ["技術分析圖", "權益曲線", "交易明細", "熱門強勢股排行", "財務數據"]
     )
 
     with tab_chart:
@@ -179,11 +257,11 @@ def main() -> None:
             st.info("點擊上方按鈕開始掃描（首次掃描需下載較多資料，可能需要數秒到數十秒）。")
         else:
             st.caption(f"掃描時使用的策略：{ranking_state['strategy_name']}")
-            for market in ["台股", "美股"]:
-                st.markdown(f"**{market}**")
-                ranking_df = ranking_state[market]
+            for rank_market in ["台股", "美股"]:
+                st.markdown(f"**{rank_market}**")
+                ranking_df = ranking_state[rank_market]
                 if ranking_df.empty:
-                    st.info(f"目前沒有{market}標的符合此策略的進場條件。")
+                    st.info(f"目前沒有{rank_market}標的符合此策略的進場條件。")
                 else:
                     st.dataframe(
                         format_ranking_table(ranking_df),
@@ -191,6 +269,87 @@ def main() -> None:
                         hide_index=True,
                     )
             st.caption("「訊號後漲幅」為自策略進場訊號觸發日起算至今的價格漲幅，僅代表目前訊號的强弱，不代表未來績效。")
+
+    with tab_fundamentals:
+        render_fundamentals_tab(ticker, currency, latest_close)
+
+
+def render_kol_page() -> None:
+    st.title("X KOL 動態")
+    st.caption("追蹤財經／技術分析類 KOL 在 X 上的最新貼文，名單來源為使用者提供的 Google Sheet。")
+
+    try:
+        roster = kol_feed.load_kol_roster()
+    except Exception as exc:
+        st.error(f"讀取 KOL 名單失敗：{exc}")
+        return
+
+    bearer_token = kol_feed.get_bearer_token()
+    if not bearer_token:
+        st.warning(
+            "尚未設定 X API 金鑰，目前僅顯示名單，不會抓取即時貼文。\n\n"
+            "設定方式：至 https://developer.x.com 申請開發者帳號並取得 Bearer Token，"
+            "然後在專案的 `.streamlit/secrets.toml` 加入：\n\n"
+            "```toml\n[x_api]\nbearer_token = \"你的 token\"\n```\n\n"
+            "部署到 Streamlit Cloud 時，改到該服務的 App settings → Secrets 貼上同樣內容，"
+            "不要把金鑰寫進程式碼或提交進 Git。"
+        )
+
+    display_roster = roster.rename(
+        columns={"name": "名稱", "url": "連結", "memo": "簡介", "follower": "粉絲數(千)"}
+    )
+    show_cols = [c for c in ["名稱", "連結", "簡介", "粉絲數(千)"] if c in display_roster.columns]
+    st.dataframe(
+        display_roster[show_cols].sort_values("粉絲數(千)", ascending=False),
+        width="stretch",
+        hide_index=True,
+        column_config={"連結": st.column_config.LinkColumn("連結")},
+    )
+
+    if not bearer_token:
+        return
+
+    st.divider()
+    selected_names = st.multiselect(
+        "選擇要抓取貼文的 KOL（建議一次選少數幾位，避免超過 API 額度）",
+        roster["name"].tolist(),
+    )
+    if st.button("抓取最新貼文", key="kol_fetch"):
+        results = {}
+        for name in selected_names:
+            row = roster[roster["name"] == name].iloc[0]
+            username = row["username"]
+            if not username:
+                results[name] = {"error": "無法從網址解析帳號。"}
+                continue
+            with st.spinner(f"抓取 @{username} 的貼文..."):
+                results[name] = kol_feed.fetch_recent_tweets(username, bearer_token)
+        st.session_state["kol_results"] = results
+
+    kol_results = st.session_state.get("kol_results")
+    if kol_results:
+        for name, result in kol_results.items():
+            st.markdown(f"**{name}**")
+            if "error" in result:
+                st.error(result["error"])
+            elif not result.get("tweets"):
+                st.info("暫無最新貼文。")
+            else:
+                for tw in result["tweets"]:
+                    created = (tw.get("created_at") or "")[:10]
+                    st.write(f"{created}　{tw.get('text', '')}")
+                    tw_metrics = tw.get("public_metrics", {})
+                    st.caption(f"讚 {tw_metrics.get('like_count', 0)}　轉推 {tw_metrics.get('retweet_count', 0)}")
+            st.divider()
+
+
+def main() -> None:
+    mode = st.sidebar.radio("功能", ["股票回測", "X KOL 動態"])
+    st.sidebar.divider()
+    if mode == "股票回測":
+        render_backtest_page()
+    else:
+        render_kol_page()
 
 
 if __name__ == "__main__":
