@@ -47,6 +47,109 @@ ENTRY_REASONS = [
 ]
 
 
+def _exit_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """算出結構停利會用到的指標。"""
+    close = df["Close"]
+    out = pd.DataFrame(index=df.index)
+    out["ema10"] = close.ewm(span=10).mean()
+    out["ema20"] = close.ewm(span=20).mean()
+    out["ma50"] = close.rolling(50).mean()
+    ema12, ema26 = close.ewm(span=12).mean(), close.ewm(span=26).mean()
+    macd = ema12 - ema26
+    out["macd_hist"] = macd - macd.ewm(span=9).mean()
+    delta = close.diff()
+    gain = delta.clip(lower=0).ewm(alpha=1 / 14).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1 / 14).mean()
+    out["rsi"] = 100 - 100 / (1 + gain / loss)
+    out["low10"] = df["Low"].rolling(10).min().shift(1)
+    out["low20"] = df["Low"].rolling(20).min().shift(1)
+    return out
+
+
+# 結構停利方式。數值為台股全市場 400 檔、5,312 筆歷史訊號（2021 起、3 個月時間上限、
+# 2N 停損）的實測結果，用來說明每個選項的取捨：出場越慢，平均 R 越高但勝率越低。
+STRUCTURAL_EXITS = {
+    "跌破 50 日均線": {
+        "fn": lambda row, ind: row["Close"] < ind["ma50"],
+        "說明": "平均 +0.43R、勝率 49.6%。R 最高且勝率接近一半，整體最平衡，建議從這個開始。",
+    },
+    "跌破前 20 日低點": {
+        "fn": lambda row, ind: row["Low"] <= ind["low20"],
+        "說明": "平均 +0.43R、勝率 46.8%。R 與 50 日均線相當，但空頭年表現最差（-0.04R）。",
+    },
+    "RSI(14) 跌破 50": {
+        "fn": lambda row, ind: ind["rsi"] < 50,
+        "說明": "平均 +0.33R、勝率 54.8%。動能消失就走，比均線敏感一些。",
+    },
+    "跌破前 10 日低點": {
+        "fn": lambda row, ind: row["Low"] <= ind["low10"],
+        "說明": "平均 +0.34R、勝率 54.1%。海龜法則的短期出場，反應較快。",
+    },
+    "跌破 20 日 EMA": {
+        "fn": lambda row, ind: row["Close"] < ind["ema20"],
+        "說明": "平均 +0.31R、勝率 56.6%。多數動能實務書的預設做法，偏積極。",
+    },
+    "跌破 10 日 EMA": {
+        "fn": lambda row, ind: row["Close"] < ind["ema10"],
+        "說明": "平均 +0.23R、勝率 61.8%。勝率高但 R 砍半，適合心理上需要常贏的人。",
+    },
+    "MACD 柱狀體轉負": {
+        "fn": lambda row, ind: ind["macd_hist"] < 0,
+        "說明": "平均 +0.22R、勝率 64.0%。勝率最高但 R 最低，出場最早。",
+    },
+}
+
+
+def check_structural_outcome(
+    df: pd.DataFrame,
+    entry_date: dt.date,
+    entry_price: float,
+    stop_price: float,
+    exit_key: str,
+    atr_value: float,
+    min_profit_n: float = 1.0,
+    max_hold_days: int | None = None,
+) -> dict:
+    """停損用固定價位（處理「看錯了」），停利用結構訊號（處理「這段走完了」）。
+
+    min_profit_n：獲利達到幾個 N 之後才讓結構停利生效。進場後的正常震盪很容易
+    立刻觸發結構訊號，實測要求先獲利 1N 才啟動，平均 R 從 +0.43 提升到 +0.47。
+    """
+    rule = STRUCTURAL_EXITS.get(exit_key)
+    if rule is None:
+        raise KeyError(f"未知的結構停利方式：{exit_key}")
+
+    after = df[df.index.date >= entry_date]
+    if after.empty:
+        return {"狀態": "無資料", "觸價日期": None, "觸價價格": None, "報酬率": None, "持有天數": 0}
+
+    indicators = _exit_indicators(df)
+    profit_gate = entry_price + min_profit_n * atr_value
+
+    for i, (date, row) in enumerate(after.iterrows()):
+        hold_days = (date.date() - entry_date).days
+        if row["Low"] <= stop_price:
+            return {
+                "狀態": "已停損", "觸價日期": date, "觸價價格": stop_price,
+                "報酬率": stop_price / entry_price - 1, "持有天數": hold_days,
+            }
+        ind_row = indicators.loc[date]
+        if i > 0 and row["Close"] >= profit_gate and bool(rule["fn"](row, ind_row)):
+            exit_price = float(row["Close"])
+            return {
+                "狀態": "已停利", "觸價日期": date, "觸價價格": exit_price,
+                "報酬率": exit_price / entry_price - 1, "持有天數": hold_days,
+            }
+
+    latest_price = float(after["Close"].iloc[-1])
+    hold_days = (after.index[-1].date() - entry_date).days
+    status = "已超時" if max_hold_days is not None and hold_days > max_hold_days else "持有中"
+    return {
+        "狀態": status, "觸價日期": None, "觸價價格": latest_price,
+        "報酬率": latest_price / entry_price - 1, "持有天數": hold_days,
+    }
+
+
 def compute_bracket(
     entry_price: float,
     atr_value: float,

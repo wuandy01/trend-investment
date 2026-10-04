@@ -22,6 +22,66 @@ from . import strategies as strategies_module
 # 計算「訊號前漲幅」時往回看幾個交易日找前波低點。
 RUNUP_LOOKBACK = 60
 
+# 相對強弱的回看期間（約 6 個月），以及判斷「是否追高」用的短期均線天數。
+RS_LOOKBACK = 120
+EXTENSION_MA = 20
+
+# 大盤環境濾網：指數與判斷用的均線天數。
+MARKET_INDEX = {"台股": "^TWII", "美股": "^GSPC"}
+REGIME_MA = 200
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def market_regime(market: str, start_date: dt.date, end_date: dt.date) -> pd.Series:
+    """回傳大盤指數每日「是否站上 200 日均線」的布林序列。
+
+    動能策略在空頭會系統性失效：實測台股 2022 年全年進場的 986 筆訊號，
+    不論用哪種出場方式平均 R 都趨近於零（+0.036 ~ -0.044），而同一套規則在
+    多頭期是 +0.5R 以上。空頭的解法是「不要進場」，不是「出場出得更快」。
+    """
+    index_ticker = MARKET_INDEX.get(market)
+    if not index_ticker:
+        return pd.Series(dtype=bool)
+    df = data_loader.load_price_data(index_ticker, start_date - dt.timedelta(days=400), end_date)
+    if df.empty:
+        return pd.Series(dtype=bool)
+    ma = df["Close"].rolling(REGIME_MA).mean()
+    return (df["Close"] > ma).dropna()
+
+
+def _strength_metrics(price_data: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """算出整個股票池每檔的相對強弱與短期乖離率。
+
+    相對強弱＝近 RS_LOOKBACK 個交易日報酬在「整個掃描池」中的百分位。這是整個
+    排行榜唯一真正衡量「強勢」的指標——在此之前排序只看訊號新舊，所以掃出來的
+    常常是剛好穿越均線的牛皮股，跟強勢無關。
+
+    乖離率＝現價相對 EXTENSION_MA 日均線的距離，用來判斷「現在進場算不算追高」。
+    這跟「訊號前漲幅」（距 60 日低點）刻意分開：強勢股必然遠離 60 日低點，用那個
+    數字當追高標準會把強勢股全部濾掉；但強勢股回檔到 20 日均線附近時，乖離率很小，
+    那正是不追高的進場點。兩個指標衡量的是不同時間尺度，要分開看。
+    """
+    rows = []
+    for ticker, df in price_data.items():
+        if len(df) < RS_LOOKBACK + 5:
+            continue
+        close = df["Close"]
+        ma = close.rolling(EXTENSION_MA).mean().iloc[-1]
+        past = close.iloc[-RS_LOOKBACK]
+        if past <= 0 or ma != ma or ma <= 0:
+            continue
+        rows.append({
+            "代碼": ticker,
+            "半年報酬": close.iloc[-1] / past - 1,
+            "乖離率": close.iloc[-1] / ma - 1,
+        })
+    if not rows:
+        return pd.DataFrame(columns=["代碼", "半年報酬", "乖離率", "相對強弱"])
+
+    metrics = pd.DataFrame(rows)
+    metrics["相對強弱"] = metrics["半年報酬"].rank(pct=True)
+    return metrics
+
 
 def _latest_signal(df: pd.DataFrame, strategy: strategies_module.Strategy, params: dict) -> dict | None:
     """若該股目前正處於策略的多單持有狀態，回傳進場資訊；否則回傳 None。"""
@@ -111,7 +171,20 @@ def scan_market(
     if not rows:
         return pd.DataFrame()
 
-    return pd.DataFrame(rows)
+    result = pd.DataFrame(rows)
+    # 相對強弱要以「整個掃描池」為母體計算，不能只排有訊號的那些，
+    # 否則百分位會失真（有訊號的股票本來就偏強）。
+    metrics = _strength_metrics(price_data)
+    if not metrics.empty:
+        result = result.merge(metrics, on="代碼", how="left")
+
+    regime = market_regime(market, start_date, end_date)
+    if not regime.empty:
+        regime_by_date = {d.date(): bool(v) for d, v in regime.items()}
+        result["進場時大盤多頭"] = result["進場日期"].map(
+            lambda d: regime_by_date.get(d.date() if hasattr(d, "date") else d)
+        )
+    return result
 
 
 def rank_signals(
@@ -120,6 +193,9 @@ def rank_signals(
     top_n: int = 10,
     max_runup: float | None = None,
     max_age_days: int | None = None,
+    min_rs: float | None = None,
+    max_extension: float | None = None,
+    require_bull_regime: bool = False,
 ) -> tuple[pd.DataFrame, dict]:
     """把 scan_market() 的掃描結果依指定方式排序、取前 N 名。
 
@@ -132,12 +208,27 @@ def rank_signals(
     回傳 (排名後的結果, 統計 dict)。排序與過濾都在這裡做、不在 scan_market，
     這樣切換設定時直接重算就好，不必重新下載整個股票池。
     """
-    stats = {"候選": int(len(df)), "漲幅濾掉": 0, "太舊濾掉": 0}
+    stats = {"候選": int(len(df)), "大盤空頭濾掉": 0, "不夠強濾掉": 0, "追高濾掉": 0, "漲幅濾掉": 0, "太舊濾掉": 0}
     if df.empty:
         return df, stats
 
     filtered = df
-    if max_runup is not None and "訊號前漲幅" in filtered.columns:
+    if require_bull_regime and "進場時大盤多頭" in filtered.columns:
+        keep = filtered["進場時大盤多頭"].isna() | filtered["進場時大盤多頭"].astype(bool)
+        stats["大盤空頭濾掉"] = int((~keep).sum())
+        filtered = filtered[keep]
+
+    if min_rs is not None and "相對強弱" in filtered.columns and not filtered.empty:
+        keep = filtered["相對強弱"].isna() | (filtered["相對強弱"] >= min_rs)
+        stats["不夠強濾掉"] = int((~keep).sum())
+        filtered = filtered[keep]
+
+    if max_extension is not None and "乖離率" in filtered.columns and not filtered.empty:
+        keep = filtered["乖離率"].isna() | (filtered["乖離率"].abs() <= max_extension)
+        stats["追高濾掉"] = int((~keep).sum())
+        filtered = filtered[keep]
+
+    if max_runup is not None and "訊號前漲幅" in filtered.columns and not filtered.empty:
         keep = filtered["訊號前漲幅"].isna() | (filtered["訊號前漲幅"] <= max_runup)
         stats["漲幅濾掉"] = int((~keep).sum())
         filtered = filtered[keep]
@@ -150,7 +241,9 @@ def rank_signals(
     if filtered.empty:
         return filtered, stats
 
-    if sort_by == "strength":
+    if sort_by == "rs" and "相對強弱" in filtered.columns:
+        sort_col, ascending = "相對強弱", False
+    elif sort_by == "strength":
         sort_col, ascending = "訊號後漲幅", False
     else:
         sort_col, ascending = "持有天數", True

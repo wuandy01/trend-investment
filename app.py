@@ -52,10 +52,22 @@ def format_metric(key: str, value) -> str:
 def format_ranking_table(df):
     display = df.copy()
     display["訊號後漲幅"] = (display["訊號後漲幅"] * 100).round(2).astype(str) + "%"
-    if "訊號前漲幅" in display.columns:
-        display["訊號前漲幅"] = display["訊號前漲幅"].apply(
-            lambda v: f"{v * 100:.1f}%" if pd.notna(v) else "N/A"
-        )
+    for col, fmt in [
+        ("訊號前漲幅", "{:.1f}%"),
+        ("乖離率", "{:+.1f}%"),
+        ("半年報酬", "{:+.1f}%"),
+        ("相對強弱", "前 {:.0f}%"),
+    ]:
+        if col not in display.columns:
+            continue
+        if col == "相對強弱":
+            display[col] = display[col].apply(
+                lambda v: fmt.format((1 - v) * 100) if pd.notna(v) else "N/A"
+            )
+        else:
+            display[col] = display[col].apply(
+                lambda v, f=fmt: f.format(v * 100) if pd.notna(v) else "N/A"
+            )
     display["進場日期"] = display["進場日期"].dt.date
     display["現價"] = display["現價"].round(2)
     display["進場價格"] = display["進場價格"].round(2)
@@ -295,7 +307,7 @@ def render_backtest_page() -> None:
         )
         universe_mode = st.radio(
             "台股掃描範圍",
-            [f"內建精選 {n_tw} 檔（快）", "全市場依成交金額取前 N 檔（推薦）"],
+            ["全市場依成交金額取前 N 檔（推薦）", f"內建精選 {n_tw} 檔（快）"],
             key="ranking_universe_mode",
             help=(
                 "內建清單只有 30 檔、其中 11 檔是金融股與 ETF，彼此高度連動，"
@@ -306,49 +318,79 @@ def render_backtest_page() -> None:
         universe_size = None
         if universe_mode.startswith("全市場"):
             universe_size = st.slider(
-                "掃描檔數（依成交金額由高到低）", 50, 300, 150, step=50, key="ranking_universe_size"
+                "掃描檔數（依成交金額由高到低）", 100, 600, 400, step=100, key="ranking_universe_size"
             )
             st.caption(
                 "證交所公開 API 每日更新，排除 ETF 與權證後約有 1,000 檔上市普通股。"
-                "掃 150 檔約需 5-10 秒，掃 300 檔約 10-20 秒。"
+                "掃 400 檔約需 20 秒。"
             )
+
+        require_bull = st.checkbox(
+            "只在大盤多頭時進場（200 日均線濾網）",
+            value=True,
+            key="ranking_require_bull",
+            help=(
+                "只保留「訊號觸發當天大盤站上 200 日均線」的標的。實測台股 2022 空頭年的 986 筆訊號，"
+                "不論用哪種出場方式平均 R 都趨近於零；同一套規則在多頭期是 +0.5R 以上。"
+                "空頭的解法是不要進場，不是出場出得更快。"
+            ),
+        )
         sort_mode = st.radio(
             "排序方式",
-            ["剛觸發訊號（發現機會）", "訊號後漲幅最高（確認強勢）"],
+            ["相對強弱最高（找強勢股）", "剛觸發訊號（發現機會）", "訊號後漲幅最高"],
             horizontal=True,
             key="ranking_sort_mode",
             help=(
-                "「剛觸發訊號」依訊號觸發至今的天數由小到大排序，優先顯示還沒漲多的新訊號；"
-                "「訊號後漲幅最高」依訊號後累積漲幅排序，代表目前動能最強，但也可能已經漲多、追高風險較高。"
+                "「相對強弱」＝近半年報酬在整個掃描池中的百分位，這是唯一真正衡量「強勢」的指標；"
+                "「剛觸發訊號」依訊號新舊排序，找的是最新機會而不是最強標的；"
+                "「訊號後漲幅」是訊號觸發後到現在的漲幅，只反映這一段訊號走得好不好。"
             ),
         )
-        use_runup_filter = st.checkbox(
-            "排除已經漲多的訊號（訊號前漲幅濾網）",
+
+        use_rs_filter = st.checkbox(
+            "只看相對強弱排前段的股票",
             value=True,
-            key="ranking_use_runup_filter",
+            key="ranking_use_rs_filter",
             help=(
-                "趨勢跟隨策略要等趨勢被確認才進場，訊號天生落後。「訊號前漲幅」＝訊號觸發當天的收盤價"
-                f"相對前 {screener.RUNUP_LOOKBACK} 個交易日最低點已經漲了多少，用來擋掉「漲一大段才確認」的訊號。"
+                "原本的排行榜完全沒有衡量「強勢」，只看訊號新舊，所以掃出來常是剛好穿越均線的牛皮股。"
+                "實測截圖那 9 檔裡有 6 檔的相對強弱在全市場後半段（大眾控 6.5%、晟銘電 9.5%、廣達 18%）。"
             ),
         )
-        max_runup = None
-        if use_runup_filter:
-            # 用整數百分比當滑桿單位，顯示才會是「20」而不是「0.20」；傳進濾網前再換回小數。
-            max_runup = st.slider(
-                "訊號前漲幅上限（%）", 5, 50, 20, step=5, key="ranking_max_runup"
-            ) / 100
-            st.caption(
-                "實測台股均線交叉 20/60：訊號觸發時的漲幅中位數是 +12.5%，有 24% 的訊號在已漲超過 20% 後才出現。"
-                "設 20% 大約會擋掉最延伸的四分之一訊號；設太低會把訊號濾到沒剩。"
+        min_rs = None
+        if use_rs_filter:
+            min_rs = st.slider(
+                "相對強弱門檻（取前 X%）", 10, 90, 30, step=10, key="ranking_min_rs",
+                help="設 30 代表只保留近半年報酬排在掃描池前 30% 的股票。",
             )
+            min_rs = 1 - min_rs / 100
+        use_extension_filter = st.checkbox(
+            "排除短線追高（乖離率濾網）",
+            value=True,
+            key="ranking_use_extension_filter",
+            help=(
+                f"乖離率＝現價距離 {screener.EXTENSION_MA} 日均線多遠。這取代了舊的「距 60 日低點漲幅」濾網——"
+                "強勢股必然遠離 60 日低點（實測會把相對強弱前 30% 的 61 檔擋掉 59 檔），"
+                "但強勢股回檔到短期均線附近時乖離率很小，那正是不追高的進場點。兩者衡量的時間尺度不同。"
+            ),
+        )
+        max_extension = None
+        if use_extension_filter:
+            # 用整數百分比當滑桿單位，顯示才會是「8」而不是「0.08」；傳進濾網前再換回小數。
+            max_extension = st.slider(
+                f"乖離率上限（%，距 {screener.EXTENSION_MA} 日均線）",
+                2, 20, 8, step=1, key="ranking_max_extension",
+            ) / 100
+        max_runup = None
 
         use_age_filter = st.checkbox(
             "只看最近觸發的新訊號（訊號年齡濾網）",
-            value=True,
+            value=False,
             key="ranking_use_age_filter",
             help=(
-                "不設年齡上限的話，候選不足時排行榜會拿幾個月前的舊訊號補滿前 10 名——"
-                "而舊訊號不會隨時間改變，所以每次掃出來都一樣，看起來就像「永遠是那幾檔」。"
+                "搭配「剛觸發訊號」排序時才需要開——不設上限的話，候選不足時排行榜會拿幾個月前的"
+                "舊訊號補滿前 10 名，而舊訊號不會變，看起來就像永遠是那幾檔。\n\n"
+                "但搭配「相對強弱」排序時建議關閉：強勢股是不是最近才穿越均線並不重要，"
+                "重要的是它現在夠強、而且沒有短線追高。實測開著這道濾網會把候選從 10 檔砍到 2 檔。"
             ),
         )
         max_age_days = st.slider(
@@ -375,7 +417,12 @@ def render_backtest_page() -> None:
         if ranking_state is None:
             st.info("點擊上方按鈕開始掃描（首次掃描需下載較多資料，可能需要數秒到數十秒）。")
         else:
-            sort_key = "fresh" if sort_mode.startswith("剛觸發") else "strength"
+            if sort_mode.startswith("相對強弱"):
+                sort_key = "rs"
+            elif sort_mode.startswith("剛觸發"):
+                sort_key = "fresh"
+            else:
+                sort_key = "strength"
             st.caption(
                 f"掃描時使用的策略：{ranking_state['strategy_name']}"
                 f"（台股掃了 {ranking_state.get('台股掃描檔數', n_tw)} 檔）"
@@ -387,10 +434,17 @@ def render_backtest_page() -> None:
                     sort_by=sort_key,
                     max_runup=max_runup,
                     max_age_days=max_age_days,
+                    min_rs=min_rs,
+                    max_extension=max_extension,
+                    require_bull_regime=require_bull,
                 )
                 filter_notes = []
-                if stats["漲幅濾掉"]:
-                    filter_notes.append(f"漲幅超過 {max_runup:.0%} 擋掉 {stats['漲幅濾掉']} 檔")
+                if stats["大盤空頭濾掉"]:
+                    filter_notes.append(f"大盤空頭期擋掉 {stats['大盤空頭濾掉']} 檔")
+                if stats["不夠強濾掉"]:
+                    filter_notes.append(f"相對強弱不足擋掉 {stats['不夠強濾掉']} 檔")
+                if stats["追高濾掉"]:
+                    filter_notes.append(f"乖離超過 {max_extension:.0%} 擋掉 {stats['追高濾掉']} 檔")
                 if stats["太舊濾掉"]:
                     filter_notes.append(f"訊號超過 {max_age_days} 天擋掉 {stats['太舊濾掉']} 檔")
                 if filter_notes:
@@ -634,14 +688,41 @@ def render_trade_planner_page() -> None:
         st.divider()
         atr_period = st.slider("ATR 天數 (N)", 5, 50, 20, step=1, key="planner_atr_period")
         stop_mult = st.slider("停損倍數（×N）", 0.5, 5.0, 2.0, step=0.5, key="planner_stop_mult")
-        target_mult = st.slider("停利倍數（×N）", 0.5, 10.0, 5.0, step=0.5, key="planner_target_mult")
+        exit_style = st.radio(
+            "停利方式",
+            ["結構停利（推薦）", "固定 N 倍數"],
+            key="planner_exit_style",
+            help=(
+                "固定倍數停利不管股票當下的走勢結構，到價就出；結構停利等技術訊號轉弱才走，"
+                "讓走得動的部位繼續跑。實測台股全市場 5,312 筆訊號，結構停利的平均 R 高於固定倍數。"
+            ),
+        )
+        target_mult = 5.0
+        structural_exit = None
+        min_profit_n = 1.0
+        if exit_style.startswith("結構"):
+            structural_exit = st.selectbox(
+                "結構停利訊號",
+                list(trade_planner.STRUCTURAL_EXITS.keys()),
+                key="planner_structural_exit",
+            )
+            st.caption(trade_planner.STRUCTURAL_EXITS[structural_exit]["說明"])
+            min_profit_n = st.slider(
+                "獲利達幾個 N 才啟動停利", 0.0, 2.0, 1.0, step=0.5, key="planner_min_profit_n",
+                help="進場後的正常震盪很容易立刻觸發結構訊號。實測要求先獲利 1N 才啟動，平均 R 從 +0.43 提升到 +0.47。",
+            )
+        else:
+            target_mult = st.slider(
+                "停利倍數（×N）", 0.5, 10.0, 5.0, step=0.5, key="planner_target_mult"
+            )
 
         st.divider()
         use_hold_limit = st.checkbox("啟用持有天數上限提醒", value=True, key="planner_use_hold_limit")
         max_hold_days = None
         if use_hold_limit:
             max_hold_days = st.slider(
-                "持有天數上限（天，僅提醒不會自動出場）", 5, 180, 30, step=5, key="planner_max_hold_days"
+                "持有天數上限（天，僅提醒不會自動出場）", 5, 180, 90, step=5, key="planner_max_hold_days",
+                help="預設 90 天（約 3 個月），對齊學術研究的最佳持有期，也是本專案所有回測採用的時間上限。",
             )
 
         st.divider()
@@ -703,8 +784,16 @@ def render_trade_planner_page() -> None:
     row1[0].metric("進場價", f"{currency}{entry_price:,.2f}")
     row1[1].metric("N (ATR)", f"{n_atr:,.2f}")
     row1[2].metric("停損價", f"{currency}{stop_price:,.2f}")
-    row1[3].metric("停利價", f"{currency}{target_price:,.2f}")
-    st.caption(f"風報比（停利距離 ÷ 停損距離）＝ {bracket['風報比']:.2f}")
+    if structural_exit:
+        row1[3].metric("停利方式", structural_exit)
+        st.caption(
+            f"停損距離 {stop_mult:.1f}N＝{currency}{entry_price - stop_price:,.2f}；"
+            f"停利沒有固定價位，等「{structural_exit}」出現才出場"
+            f"（獲利需先達 {min_profit_n:.1f}N 才啟動）。"
+        )
+    else:
+        row1[3].metric("停利價", f"{currency}{target_price:,.2f}")
+        st.caption(f"風報比（停利距離 ÷ 停損距離）＝ {bracket['風報比']:.2f}")
 
     st.markdown("##### 建議部位大小")
     sizing = trade_planner.compute_position_size(
@@ -736,9 +825,16 @@ def render_trade_planner_page() -> None:
                 "代表需要槓桿才吃得下。建議縮小單筆風險比例，或把停損設得更靠近進場價。"
             )
 
-    outcome = trade_planner.check_bracket_outcome(
-        price_df, entry_date, entry_price, stop_price, target_price, direction, max_hold_days=max_hold_days
-    )
+    if structural_exit:
+        outcome = trade_planner.check_structural_outcome(
+            price_df, entry_date, entry_price, stop_price, structural_exit, n_atr,
+            min_profit_n=min_profit_n, max_hold_days=max_hold_days,
+        )
+    else:
+        outcome = trade_planner.check_bracket_outcome(
+            price_df, entry_date, entry_price, stop_price, target_price, direction,
+            max_hold_days=max_hold_days,
+        )
 
     status = outcome["狀態"]
     if status == "已停利":
@@ -960,6 +1056,7 @@ def _render_watchlist_test_tab(atr_period: int, stop_mult: float, target_mult: f
                     "多",
                     max_hold_days=max_hold_days,
                 )
+                latest_price = float(price_df["Close"].iloc[-1])
                 results.append(
                     {
                         "市場": item["市場"],
@@ -967,6 +1064,7 @@ def _render_watchlist_test_tab(atr_period: int, stop_mult: float, target_mult: f
                         "名稱": item["名稱"],
                         "進場日期": entry_date,
                         "進場價": round(entry_price, 2),
+                        "現價": round(latest_price, 2),
                         "N (ATR)": round(n_atr, 2),
                         "停損價": round(bracket["停損價"], 2),
                         "停利價": round(bracket["停利價"], 2),
@@ -982,9 +1080,23 @@ def _render_watchlist_test_tab(atr_period: int, stop_mult: float, target_mult: f
     results_df = st.session_state.get("strength_test_results")
     if results_df is not None and not results_df.empty:
         st.markdown("##### 測試結果")
+        st.caption("點選任一列可在下方展開該檔的走勢圖（含進場點與停損停利線）。")
         display_results = results_df.copy()
         display_results["報酬率"] = (display_results["報酬率"] * 100).round(2).astype(str) + "%"
-        st.dataframe(display_results, width="stretch", hide_index=True)
+        selection = st.dataframe(
+            display_results,
+            width="stretch",
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            key="strength_results_table",
+        )
+
+        selected_rows = selection.selection.rows if selection and selection.selection else []
+        if selected_rows:
+            _render_strength_detail_chart(
+                results_df.iloc[selected_rows[0]], atr_period, stop_mult, target_mult, max_hold_days
+            )
 
         resolved = results_df[results_df["狀態"].isin(["已停利", "已停損"])]
         if not resolved.empty:
@@ -1001,6 +1113,41 @@ def _render_watchlist_test_tab(atr_period: int, stop_mult: float, target_mult: f
         )
     elif results_df is not None:
         st.info("清單中的標的目前都沒有足夠資料可以測試。")
+
+
+def _render_strength_detail_chart(
+    row: pd.Series, atr_period: int, stop_mult: float, target_mult: float, max_hold_days: int | None
+) -> None:
+    """畫出測試結果中被點選那一檔的走勢圖，沿用停損停利規劃頁的同一張圖。"""
+    ticker = row["代碼"]
+    entry_date = row["進場日期"]
+    entry_price = float(row["進場價"])
+    today = dt.date.today()
+    currency = data_loader.MARKET_CURRENCY.get(row["市場"], "")
+
+    fetch_start = entry_date - dt.timedelta(days=atr_period * 4 + 30)
+    price_df = data_loader.load_price_data(ticker, fetch_start, today)
+    if price_df.empty:
+        st.warning(f"查無 {ticker} 的價格資料。")
+        return
+
+    outcome = trade_planner.check_bracket_outcome(
+        price_df, entry_date, entry_price, float(row["停損價"]), float(row["停利價"]), "多",
+        max_hold_days=max_hold_days,
+    )
+
+    st.markdown(f"**{ticker}　{row['名稱']}**")
+    cols = st.columns(5)
+    cols[0].metric("進場價", f"{currency}{entry_price:,.2f}")
+    cols[1].metric("現價", f"{currency}{float(row['現價']):,.2f}")
+    cols[2].metric("停損價", f"{currency}{float(row['停損價']):,.2f}")
+    cols[3].metric("停利價", f"{currency}{float(row['停利價']):,.2f}")
+    cols[4].metric("狀態", row["狀態"])
+
+    fig = charts.build_bracket_chart(
+        price_df, entry_date, entry_price, float(row["停損價"]), float(row["停利價"]), outcome, ticker
+    )
+    st.plotly_chart(fig, use_container_width=True, key=f"strength_chart_{ticker}")
 
 
 def _render_param_scan_tab() -> None:
