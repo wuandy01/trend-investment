@@ -30,10 +30,15 @@ TRADE_LOG_COLUMNS = [
     "停利倍數",
     "停損價",
     "停利價",
+    "停利方式",
     "股數",
     "進場理由",
     "備註",
 ]
+
+# 「停利方式」欄位的固定倍數選項值；其餘值代表結構停利訊號的名稱（見 STRUCTURAL_EXITS）。
+# 舊版紀錄沒有這個欄位，load_trade_log() 會補成固定倍數，維持原本的判斷方式。
+FIXED_TARGET_LABEL = "固定 N 倍數"
 
 # 舊版紀錄沒有「股數」與「進場理由」欄位，load_trade_log() 會補上空值，
 # 不需要手動改既有的 CSV。
@@ -339,11 +344,23 @@ def summarize_holding_period(
     }
 
 
+def parse_entry_dates(series: pd.Series) -> pd.Series:
+    """把「進場日期」欄位轉成 datetime，容忍同一個檔案裡混用的日期格式。
+
+    舊版的 append_trade_record 會把讀進來的 datetime 和新寫入的 date 混在一起存，
+    導致 CSV 裡同時有 "2026-07-01 00:00:00" 和 "2026-09-28" 兩種格式，
+    pandas 預設會依第一列推斷格式、碰到第二種就整個噴 ValueError。
+    """
+    return pd.to_datetime(series, format="mixed", errors="coerce")
+
+
 def load_trade_log() -> pd.DataFrame:
     """讀取交易紀錄。舊版檔案缺少的欄位會自動補上空值，不需要手動改 CSV。"""
     if not TRADE_LOG_PATH.exists():
         return pd.DataFrame(columns=TRADE_LOG_COLUMNS)
-    df = pd.read_csv(TRADE_LOG_PATH, parse_dates=["進場日期"])
+    df = pd.read_csv(TRADE_LOG_PATH)
+    if "進場日期" in df.columns:
+        df["進場日期"] = parse_entry_dates(df["進場日期"])
     for col in TRADE_LOG_COLUMNS:
         if col not in df.columns:
             df[col] = pd.NA
@@ -372,24 +389,39 @@ def evaluate_trade_log(
         entry_date = pd.to_datetime(r["進場日期"]).date()
         entry_price = float(r["進場價"])
         stop_price = float(r["停損價"])
-        target_price = float(r["停利價"])
         direction = r["方向"]
+
+        # 結構停利的紀錄沒有固定停利價，必須用當初選的訊號重新判斷；
+        # 若誤用固定價位會報出使用者從未設定過的「已停利」。
+        exit_style = r.get("停利方式")
+        exit_style = exit_style if isinstance(exit_style, str) and exit_style else FIXED_TARGET_LABEL
+        is_structural = exit_style in STRUCTURAL_EXITS
+        target_price = None if is_structural else float(r["停利價"])
 
         df = price_data.get(ticker)
         if df is None or df.empty:
             rows.append({
                 "代碼": ticker, "方向": direction, "進場日期": entry_date,
-                "進場價": entry_price, "停損價": stop_price, "停利價": target_price,
+                "進場價": entry_price, "停損價": stop_price,
+                "停利方式": exit_style if is_structural else f"{exit_style}（{target_price:,.2f}）",
                 "現價": None, "狀態": "無資料", "報酬率": None,
                 "持有天數": None, "距停損": None, "股數": r.get("股數"),
                 "部位市值": None, "進場理由": r.get("進場理由"), "備註": r.get("備註"),
             })
             continue
 
-        outcome = check_bracket_outcome(
-            df, entry_date, entry_price, stop_price, target_price,
-            direction, max_hold_days=max_hold_days,
-        )
+        if is_structural:
+            n_atr = r.get("N (ATR)")
+            outcome = check_structural_outcome(
+                df, entry_date, entry_price, stop_price, exit_style,
+                float(n_atr) if pd.notna(n_atr) else 0.0,
+                min_profit_n=1.0, max_hold_days=max_hold_days,
+            )
+        else:
+            outcome = check_bracket_outcome(
+                df, entry_date, entry_price, stop_price, target_price,
+                direction, max_hold_days=max_hold_days,
+            )
         current_price = outcome["觸價價格"]
 
         # 距停損：現價還要往不利方向走多少 % 才會觸及停損。已平倉的不適用。
@@ -408,7 +440,7 @@ def evaluate_trade_log(
             "進場日期": entry_date,
             "進場價": entry_price,
             "停損價": stop_price,
-            "停利價": target_price,
+            "停利方式": exit_style if is_structural else f"{exit_style}（{target_price:,.2f}）",
             "現價": round(current_price, 2) if current_price else None,
             "狀態": outcome["狀態"],
             "報酬率": outcome["報酬率"],
@@ -451,8 +483,21 @@ def summarize_by_reason(evaluated: pd.DataFrame) -> pd.DataFrame:
 
 
 def append_trade_record(record: dict) -> None:
+    """附加一筆交易紀錄。
+
+    進場日期一律正規化成 YYYY-MM-DD 再寫檔。不這樣做的話，讀進來的 datetime
+    會被寫成帶時間的格式、而新加的 date 不帶時間，同一個檔案就出現兩種格式，
+    下次讀取時解析會失敗。
+    """
     TRADE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     new_row = pd.DataFrame([record], columns=TRADE_LOG_COLUMNS)
     df = load_trade_log()
-    df = new_row if df.empty else pd.concat([df, new_row], ignore_index=True)
+    if df.empty:
+        df = new_row
+    else:
+        # 全空的欄位（例如結構停利時的「停利價」）在 concat 時會觸發 dtype 推斷的
+        # FutureWarning，兩邊都先丟掉再接，最後用 reindex 補回完整欄位。
+        parts = [p.dropna(axis=1, how="all") for p in (df, new_row)]
+        df = pd.concat(parts, ignore_index=True).reindex(columns=TRADE_LOG_COLUMNS)
+    df["進場日期"] = parse_entry_dates(df["進場日期"]).dt.strftime("%Y-%m-%d")
     df.to_csv(TRADE_LOG_PATH, index=False)

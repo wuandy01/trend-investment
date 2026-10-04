@@ -74,6 +74,41 @@ def format_ranking_table(df):
     return display
 
 
+# 觸發出場訊號的標的要一眼看得出來，不然清單一長就得逐列核對「狀態」欄位。
+# 顏色刻意用飽和一點的色階：太淡的底色在表格裡等於沒有標。
+STATUS_STYLES = {
+    "已停損": ("#ffb3ba", "🔴"),   # 紅：已觸停損，要處理
+    "已停利": ("#a8e6a3", "🟢"),   # 綠：已觸停利，要處理
+    "已超時": ("#ffe08a", "🟡"),   # 黃：超過持有上限，該重新評估
+}
+
+
+def mark_status(df: pd.DataFrame) -> pd.DataFrame:
+    """在「狀態」欄位前面加上色塊 emoji。
+
+    底色由 Styler 負責，但 Styler 在某些表格（例如開啟列選取的）會被淡化或忽略，
+    emoji 則一定看得到，兩者並用才不會漏掉訊號。
+    """
+    if "狀態" not in df.columns:
+        return df
+    out = df.copy()
+    out["狀態"] = out["狀態"].map(lambda s: f"{STATUS_STYLES[s][1]} {s}" if s in STATUS_STYLES else s)
+    return out
+
+
+def style_by_status(df: pd.DataFrame):
+    """依「狀態」欄位把整列上色；沒有狀態欄位就原樣回傳。"""
+    if "狀態" not in df.columns:
+        return df
+
+    def row_color(row):
+        status = str(row["狀態"]).lstrip("🔴🟢🟡 ")
+        color = STATUS_STYLES.get(status, ("", ""))[0]
+        return [f"background-color: {color}" if color else "" for _ in row]
+
+    return df.style.apply(row_color, axis=1)
+
+
 def render_ticker_picker(market: str, popular: dict, key_prefix: str) -> str:
     """股票代碼輸入元件。
 
@@ -942,7 +977,9 @@ def render_trade_planner_page() -> None:
             "停損倍數": stop_mult,
             "停利倍數": target_mult,
             "停損價": round(stop_price, 2),
-            "停利價": round(target_price, 2),
+            # 結構停利沒有固定價位，存 None；否則部位管理會拿一個使用者沒設過的價位去判斷。
+            "停利價": None if structural_exit else round(target_price, 2),
+            "停利方式": structural_exit or trade_planner.FIXED_TARGET_LABEL,
             "股數": int(actual_shares),
             "進場理由": entry_reason,
             "備註": note,
@@ -957,7 +994,7 @@ def render_trade_planner_page() -> None:
         st.info("尚無儲存的紀錄。")
     else:
         display_log = log.copy()
-        display_log["進場日期"] = pd.to_datetime(display_log["進場日期"]).dt.date
+        display_log["進場日期"] = trade_planner.parse_entry_dates(display_log["進場日期"]).dt.date
         display_log["備註"] = display_log["備註"].fillna("")
         st.dataframe(display_log.sort_values("記錄時間", ascending=False), width="stretch", hide_index=True)
     st.caption(
@@ -1084,11 +1121,27 @@ def _render_watchlist_test_tab(atr_period: int, stop_mult: float, target_mult: f
     results_df = st.session_state.get("strength_test_results")
     if results_df is not None and not results_df.empty:
         st.markdown("##### 測試結果")
-        st.caption("點選任一列可在下方展開該檔的走勢圖（含進場點與停損停利線）。")
-        display_results = results_df.copy()
-        display_results["報酬率"] = (display_results["報酬率"] * 100).round(2).astype(str) + "%"
+        triggered = results_df[results_df["狀態"].isin(["已停損", "已停利", "已超時"])]
+        if not triggered.empty:
+            parts = []
+            for status, label in [("已停損", "🔴 已停損"), ("已停利", "🟢 已停利"), ("已超時", "🟡 已超時")]:
+                names = list(triggered[triggered["狀態"] == status]["名稱"])
+                if names:
+                    parts.append(f"{label}：{'、'.join(names)}")
+            st.warning("　｜　".join(parts))
+        st.caption(
+            "🔴 已停損、🟢 已停利、🟡 已超時的列會整列上色。點選任一列可在下方展開該檔的走勢圖。"
+        )
+        display_results = mark_status(results_df)
+        display_results["報酬率"] = display_results["報酬率"].map(
+            lambda v: f"{v:+.2%}" if pd.notna(v) else "—"
+        )
+        for col in ("進場價", "現價", "停損價", "停利價", "N (ATR)"):
+            display_results[col] = display_results[col].map(
+                lambda v: f"{v:,.2f}" if pd.notna(v) else "—"
+            )
         selection = st.dataframe(
-            display_results,
+            style_by_status(display_results),
             width="stretch",
             hide_index=True,
             on_select="rerun",
@@ -1290,7 +1343,7 @@ def render_position_page() -> None:
         max_hold_days = None
         if use_hold_limit:
             max_hold_days = st.slider(
-                "持有天數上限（天）", 5, 180, 30, step=5, key="position_max_hold_days"
+                "持有天數上限（天）", 30, 420, 365, step=15, key="position_max_hold_days"
             )
 
     log = trade_planner.load_trade_log()
@@ -1299,7 +1352,7 @@ def render_position_page() -> None:
         st.stop()
 
     tickers = tuple(sorted(log["代碼"].dropna().unique()))
-    earliest = pd.to_datetime(log["進場日期"]).min().date()
+    earliest = trade_planner.parse_entry_dates(log["進場日期"]).min().date()
     with st.spinner(f"更新 {len(tickers)} 檔標的的價格..."):
         price_data = _load_prices_for_log(tickers, earliest)
 
@@ -1339,16 +1392,18 @@ def _render_open_positions_tab(evaluated: pd.DataFrame, max_hold_days: int | Non
     open_pos = open_pos.sort_values("距停損", na_position="last")
 
     display = open_pos[[
-        "代碼", "方向", "進場日期", "進場價", "現價", "停損價", "停利價",
+        "代碼", "方向", "進場日期", "進場價", "現價", "停損價", "停利方式",
         "報酬率", "距停損", "持有天數", "狀態", "進場理由", "備註",
     ]].copy()
     display["報酬率"] = display["報酬率"].map(lambda v: f"{v:+.2%}" if pd.notna(v) else "—")
     display["距停損"] = display["距停損"].map(lambda v: f"{v:.2%}" if pd.notna(v) else "—")
+    for col in ("進場價", "現價", "停損價"):
+        display[col] = display[col].map(lambda v: f"{v:,.2f}" if pd.notna(v) else "—")
     display["進場理由"] = display["進場理由"].fillna("(未填)")
     display["備註"] = display["備註"].fillna("")
-    st.dataframe(display, width="stretch", hide_index=True)
+    st.dataframe(style_by_status(mark_status(display)), width="stretch", hide_index=True)
     st.caption(
-        "「距停損」＝現價還要往不利方向走多少 % 才會觸及停損價，已由小到大排序，"
+        "🟡 已超時的列會整列上色。「距停損」＝現價還要往不利方向走多少 % 才會觸及停損價，已由小到大排序，"
         "數字最小的部位最接近出場。"
     )
 
@@ -1393,14 +1448,18 @@ def _render_review_tab(evaluated: pd.DataFrame) -> None:
 
     st.markdown("##### 逐筆檢討")
     detail = closed[[
-        "代碼", "方向", "進場日期", "進場價", "停損價", "停利價",
+        "代碼", "方向", "進場日期", "進場價", "停損價", "停利方式",
         "狀態", "報酬率", "持有天數", "進場理由", "備註",
     ]].copy()
     detail["報酬率"] = detail["報酬率"].map(lambda v: f"{v:+.2%}" if pd.notna(v) else "—")
+    for col in ("進場價", "停損價"):
+        detail[col] = detail[col].map(lambda v: f"{v:,.2f}" if pd.notna(v) else "—")
     detail["進場理由"] = detail["進場理由"].fillna("(未填)")
     detail["備註"] = detail["備註"].fillna("")
     st.dataframe(
-        detail.sort_values("進場日期", ascending=False), width="stretch", hide_index=True
+        style_by_status(mark_status(detail).sort_values("進場日期", ascending=False)),
+        width="stretch",
+        hide_index=True,
     )
 
 
