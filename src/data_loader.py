@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
+import urllib.request
 
 import pandas as pd
 import streamlit as st
 import yfinance as yf
+
+# 證交所每日收盤行情 OpenAPI（公開、免金鑰），用來取得「全上市股票 + 當日成交金額」，
+# 讓熱門強勢股掃描可以從真正的全市場挑標的，而不是只掃下面那份手動維護的清單。
+TWSE_DAILY_API = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
 
 # 常見股票清單，供下拉選單與熱門強勢股掃描使用；使用者也可以自行輸入代碼。
 POPULAR_TICKERS = {
@@ -77,6 +83,38 @@ POPULAR_TICKERS = {
 }
 
 MARKET_CURRENCY = {"台股": "NT$", "美股": "US$"}
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def fetch_twse_universe(top_n: int) -> dict[str, str]:
+    """從證交所 OpenAPI 取得全上市股票，依當日成交金額由高到低取前 top_n 檔。
+
+    POPULAR_TICKERS 那份 30 檔的手動清單有兩個問題：數量太少（掃出來永遠是那幾檔），
+    而且它是「知名大型股」而非「成交熱絡的股票」——實測成交金額前 12 名裡有 9 檔
+    根本不在清單內。這裡改用成交金額排序，「熱門」才名符其實。
+
+    只保留 4 碼純數字代碼（排除 00 開頭的 ETF、5 碼以上的權證與特別股）。
+    抓取失敗時回傳空 dict，由呼叫端決定要不要退回內建清單。
+    """
+    try:
+        req = urllib.request.Request(TWSE_DAILY_API, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            rows = json.load(resp)
+    except Exception:
+        return {}
+
+    def turnover(row: dict) -> float:
+        try:
+            return float(row.get("TradeValue") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    stocks = [
+        r for r in rows
+        if len(r.get("Code", "")) == 4 and r["Code"].isdigit() and not r["Code"].startswith("00")
+    ]
+    stocks.sort(key=turnover, reverse=True)
+    return {f"{r['Code']}.TW": r.get("Name", r["Code"]) for r in stocks[:top_n]}
 
 
 def normalize_ticker(raw_code: str, market: str) -> str:

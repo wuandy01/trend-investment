@@ -52,6 +52,10 @@ def format_metric(key: str, value) -> str:
 def format_ranking_table(df):
     display = df.copy()
     display["訊號後漲幅"] = (display["訊號後漲幅"] * 100).round(2).astype(str) + "%"
+    if "訊號前漲幅" in display.columns:
+        display["訊號前漲幅"] = display["訊號前漲幅"].apply(
+            lambda v: f"{v * 100:.1f}%" if pd.notna(v) else "N/A"
+        )
     display["進場日期"] = display["進場日期"].dt.date
     display["現價"] = display["現價"].round(2)
     display["進場價格"] = display["進場價格"].round(2)
@@ -286,9 +290,28 @@ def render_backtest_page() -> None:
         n_tw = len(data_loader.POPULAR_TICKERS["台股"])
         n_us = len(data_loader.POPULAR_TICKERS["美股"])
         st.caption(
-            f"根據左側目前選擇的策略「{strategy.name}」與參數，分別掃描台股（{n_tw} 檔）與美股（{n_us} 檔）"
-            f"熱門標的，找出目前有進場訊號的股票。"
+            f"根據左側目前選擇的策略「{strategy.name}」與參數，分別掃描台股與美股（{n_us} 檔）"
+            f"標的，找出目前有進場訊號的股票。"
         )
+        universe_mode = st.radio(
+            "台股掃描範圍",
+            [f"內建精選 {n_tw} 檔（快）", "全市場依成交金額取前 N 檔（推薦）"],
+            key="ranking_universe_mode",
+            help=(
+                "內建清單只有 30 檔、其中 11 檔是金融股與 ETF，彼此高度連動，"
+                "所以掃出來永遠是那幾檔。改用證交所全市場資料依當日成交金額排序，"
+                "「熱門」才名符其實。美股沒有對等的免費全市場 API，仍使用內建清單。"
+            ),
+        )
+        universe_size = None
+        if universe_mode.startswith("全市場"):
+            universe_size = st.slider(
+                "掃描檔數（依成交金額由高到低）", 50, 300, 150, step=50, key="ranking_universe_size"
+            )
+            st.caption(
+                "證交所公開 API 每日更新，排除 ETF 與權證後約有 1,000 檔上市普通股。"
+                "掃 150 檔約需 5-10 秒，掃 300 檔約 10-20 秒。"
+            )
         sort_mode = st.radio(
             "排序方式",
             ["剛觸發訊號（發現機會）", "訊號後漲幅最高（確認強勢）"],
@@ -299,14 +322,52 @@ def render_backtest_page() -> None:
                 "「訊號後漲幅最高」依訊號後累積漲幅排序，代表目前動能最強，但也可能已經漲多、追高風險較高。"
             ),
         )
+        use_runup_filter = st.checkbox(
+            "排除已經漲多的訊號（訊號前漲幅濾網）",
+            value=True,
+            key="ranking_use_runup_filter",
+            help=(
+                "趨勢跟隨策略要等趨勢被確認才進場，訊號天生落後。「訊號前漲幅」＝訊號觸發當天的收盤價"
+                f"相對前 {screener.RUNUP_LOOKBACK} 個交易日最低點已經漲了多少，用來擋掉「漲一大段才確認」的訊號。"
+            ),
+        )
+        max_runup = None
+        if use_runup_filter:
+            # 用整數百分比當滑桿單位，顯示才會是「20」而不是「0.20」；傳進濾網前再換回小數。
+            max_runup = st.slider(
+                "訊號前漲幅上限（%）", 5, 50, 20, step=5, key="ranking_max_runup"
+            ) / 100
+            st.caption(
+                "實測台股均線交叉 20/60：訊號觸發時的漲幅中位數是 +12.5%，有 24% 的訊號在已漲超過 20% 後才出現。"
+                "設 20% 大約會擋掉最延伸的四分之一訊號；設太低會把訊號濾到沒剩。"
+            )
+
+        use_age_filter = st.checkbox(
+            "只看最近觸發的新訊號（訊號年齡濾網）",
+            value=True,
+            key="ranking_use_age_filter",
+            help=(
+                "不設年齡上限的話，候選不足時排行榜會拿幾個月前的舊訊號補滿前 10 名——"
+                "而舊訊號不會隨時間改變，所以每次掃出來都一樣，看起來就像「永遠是那幾檔」。"
+            ),
+        )
+        max_age_days = st.slider(
+            "訊號年齡上限（天）", 5, 120, 30, step=5, key="ranking_max_age"
+        ) if use_age_filter else None
         scan_clicked = st.button("掃描熱門強勢股排行", key="scan_ranking")
 
         if scan_clicked:
             params_items = tuple(sorted(params.items()))
-            with st.spinner("掃描中，需下載多檔股票資料，請稍候..."):
+            tw_universe, fell_back = screener.resolve_universe("台股", universe_size)
+            if fell_back:
+                st.warning("證交所 API 抓取失敗，台股這次改用內建的 30 檔精選清單。")
+            with st.spinner(f"掃描中，台股 {len(tw_universe)} 檔 + 美股 {n_us} 檔，請稍候..."):
                 st.session_state["ranking_result"] = {
                     "strategy_name": strategy.name,
-                    "台股": screener.scan_market("台股", strategy_key, params_items, start_date, end_date),
+                    "台股掃描檔數": len(tw_universe),
+                    "台股": screener.scan_market(
+                        "台股", strategy_key, params_items, start_date, end_date, universe_size=universe_size
+                    ),
                     "美股": screener.scan_market("美股", strategy_key, params_items, start_date, end_date),
                 }
 
@@ -315,12 +376,34 @@ def render_backtest_page() -> None:
             st.info("點擊上方按鈕開始掃描（首次掃描需下載較多資料，可能需要數秒到數十秒）。")
         else:
             sort_key = "fresh" if sort_mode.startswith("剛觸發") else "strength"
-            st.caption(f"掃描時使用的策略：{ranking_state['strategy_name']}")
+            st.caption(
+                f"掃描時使用的策略：{ranking_state['strategy_name']}"
+                f"（台股掃了 {ranking_state.get('台股掃描檔數', n_tw)} 檔）"
+            )
             for rank_market in ["台股", "美股"]:
                 st.markdown(f"**{rank_market}**")
-                ranking_df = screener.rank_signals(ranking_state[rank_market], sort_by=sort_key)
+                ranking_df, stats = screener.rank_signals(
+                    ranking_state[rank_market],
+                    sort_by=sort_key,
+                    max_runup=max_runup,
+                    max_age_days=max_age_days,
+                )
+                filter_notes = []
+                if stats["漲幅濾掉"]:
+                    filter_notes.append(f"漲幅超過 {max_runup:.0%} 擋掉 {stats['漲幅濾掉']} 檔")
+                if stats["太舊濾掉"]:
+                    filter_notes.append(f"訊號超過 {max_age_days} 天擋掉 {stats['太舊濾掉']} 檔")
+                if filter_notes:
+                    st.caption(f"候選 {stats['候選']} 檔｜" + "、".join(filter_notes))
                 if ranking_df.empty:
-                    st.info(f"目前沒有{rank_market}標的符合此策略的進場條件。")
+                    if stats["候選"]:
+                        st.info(
+                            f"{rank_market}有 {stats['候選']} 檔在訊號中，但全被濾網擋掉了。"
+                            "這通常代表「最近真的沒有新的進場機會」——可以放寬訊號年齡上限、"
+                            "擴大掃描檔數，或改用觸發頻率較高的策略（例如 MACD）。"
+                        )
+                    else:
+                        st.info(f"目前沒有{rank_market}標的符合此策略的進場條件。")
                 else:
                     display_df = format_ranking_table(ranking_df)
                     display_df.insert(0, "加入強勢股測試", False)
@@ -718,6 +801,28 @@ def render_trade_planner_page() -> None:
         "進場理由會在「部位管理」→「決策回顧」裡跟實際結果並排比對，"
         "用來看出自己哪一類判斷長期是賺的、哪一類是賠的。這是整個工具裡最值得長期累積的資料。"
     )
+    # key 帶入建議股數：建議值一變（換股票／改停損／改風險比例）就視為全新欄位重新套用，
+    # 否則 Streamlit 會沿用使用者上次手動打過的舊股數。
+    actual_shares = st.number_input(
+        f"實際股數（預設為建議的 {shares:,.0f} 股，可改成你實際成交的數量）",
+        min_value=0,
+        value=int(shares),
+        step=int(lot_size),
+        key=f"planner_shares_{ticker}_{entry_date}_{int(shares)}",
+    )
+    if actual_shares > 0:
+        actual_risk = actual_shares * abs(entry_price - stop_price)
+        actual_value = actual_shares * entry_price
+        risk_cols = st.columns(3)
+        risk_cols[0].metric("實際部位市值", f"{currency}{actual_value:,.0f}")
+        risk_cols[1].metric("實際風險金額", f"{currency}{actual_risk:,.0f}")
+        risk_cols[2].metric("佔總資金", f"{actual_value / capital:.1%}" if capital > 0 else "N/A")
+        if capital > 0 and actual_risk / capital > risk_pct * 1.5:
+            st.warning(
+                f"⚠️ 這個股數的風險金額是總資金的 {actual_risk / capital:.2%}，"
+                f"明顯超過你設定的單筆風險上限 {risk_pct:.2%}。"
+            )
+
     reason_col, note_col = st.columns([1, 2])
     entry_reason = reason_col.selectbox(
         "進場理由", trade_planner.ENTRY_REASONS, key="planner_reason"
@@ -738,7 +843,7 @@ def render_trade_planner_page() -> None:
             "停利倍數": target_mult,
             "停損價": round(stop_price, 2),
             "停利價": round(target_price, 2),
-            "股數": shares,
+            "股數": int(actual_shares),
             "進場理由": entry_reason,
             "備註": note,
         }
