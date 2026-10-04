@@ -1,4 +1,6 @@
-"""跨股票掃描器：依選定策略找出目前有進場訊號、且訊號後漲幅最強的熱門股。"""
+"""跨股票掃描器：依選定策略找出目前有進場訊號的熱門股，可依「剛觸發訊號」或
+「訊號後漲幅最高」兩種方式排序——前者用來發現還沒漲多的新機會，後者用來確認
+目前動能最強勢的股票（但也代表可能已經漲多，追高風險較高）。"""
 
 from __future__ import annotations
 
@@ -52,9 +54,13 @@ def scan_market(
     params_items: tuple[tuple[str, float], ...],
     start_date: dt.date,
     end_date: dt.date,
-    top_n: int = 10,
 ) -> pd.DataFrame:
-    """掃描指定市場的熱門標的，回傳依「訊號後漲幅」排序的前 N 名。"""
+    """掃描指定市場的熱門標的，回傳「所有」目前有進場訊號的股票（未排序、未篩選筆數）。
+
+    刻意不在這裡排序或截斷——排序方式（剛觸發 vs 漲幅最高）是使用者可切換的顯示選項，
+    不該影響昂貴的下載＋掃描這一步；掃描結果快取起來，切換排序時直接用 rank_signals()
+    重新排就好，不用重新下載。
+    """
     strategy = strategies_module.get_strategy(strategy_key)
     params = dict(params_items)
 
@@ -72,6 +78,23 @@ def scan_market(
     if not rows:
         return pd.DataFrame()
 
-    result = pd.DataFrame(rows).sort_values("訊號後漲幅", ascending=False).head(top_n)
+    return pd.DataFrame(rows)
+
+
+def rank_signals(df: pd.DataFrame, sort_by: str = "fresh", top_n: int = 10) -> pd.DataFrame:
+    """把 scan_market() 的掃描結果依指定方式排序、取前 N 名。
+
+    sort_by："fresh" 依「持有天數」由小到大（訊號最新觸發優先，用來發現還沒漲多的新機會）；
+             "strength" 依「訊號後漲幅」由高到低（目前動能最強勢，但也可能已經漲多）。
+    """
+    if df.empty:
+        return df
+
+    if sort_by == "strength":
+        sort_col, ascending = "訊號後漲幅", False
+    else:
+        sort_col, ascending = "持有天數", True
+
+    result = df.sort_values(sort_col, ascending=ascending).head(top_n).reset_index(drop=True)
     result.insert(0, "排名", range(1, len(result) + 1))
-    return result.reset_index(drop=True)
+    return result

@@ -1,98 +1,93 @@
-# 趨勢投資回測系統
+# Trend Investment — Strategy Backtesting & Trade Planning Platform
 
-用 Streamlit 打造的股票交易策略回測網站，支援台股與美股，可選擇股票、回測起訖日期與技術指標策略，畫出技術分析圖與權益曲線，並掃描熱門強勢股、查看基本面財務數據、追蹤財經 KOL 動態。
+A Streamlit application for backtesting technical trading strategies on Taiwan and US equities, with parameter sweeping, cross-market screening, and ATR-based trade planning.
 
-> 本工具僅供策略研究與教育用途，所有數據與回測結果不構成投資建議。
+> Built for strategy research and education. Backtested results are historical simulations and do not constitute investment advice or a prediction of future performance.
 
-左側「功能」切換四個主頁面：**股票回測**（含 5 個分頁）、**海龜交易法則**（獨立的多空 ATR 突破系統）、**停損停利規劃**（單純的固定停損停利計算機＋交易紀錄）與 **X KOL 動態**（獨立頁面，不受股票/策略設定影響）。
+繁體中文版說明請見 [README.zh-TW.md](README.zh-TW.md)。
 
-## 功能：股票回測
+---
 
-- **選擇股票**：台股（自動補上 `.TW`）與美股，內建常見標的清單，也可自行輸入代碼
-- **選擇回測區間**：起始日期／結束日期
-- **五種策略**（皆可調整參數）：均線交叉、RSI 超買超賣、MACD、布林通道、ATR 通道突破
-- **回測績效**：總報酬率、CAGR、夏普比率、最大回檔、勝率、獲利因子，並與買進持有比較
-- **技術分析圖**：Plotly 互動式 K 線圖（紅漲綠跌），疊加指標線／通道與進出場標記，下方含成交量與指標子圖
-- **權益曲線**：策略 vs 買進持有的資產成長曲線與回檔幅度
-- **交易明細**：每筆交易的進出場日期、價格、報酬率
-- **熱門強勢股排行**：依左側選定的策略與參數，掃描台股與美股熱門標的（各 30 檔），列出目前有進場訊號、且訊號後漲幅最高的前 10 名（台美股分開列示）
-- **財務數據**：Yahoo Finance 基本面——公司資訊、關鍵比率（P/E、P/B、ROE、毛利率等）、三大財報（損益表／資產負債表／現金流量表，近 5 年）、分析師評等與目標價
+## Why this repo is worth a look
 
-> 富途牛牛 (Futu) 沒有公開 API，需要本機安裝並登入 OpenD 閘道才能串接，部署到雲端後會失效，因此本專案的財務數據**只採用 Yahoo Finance**。
+Most backtesting side-projects report a headline return and stop there. The design decisions below were the actual work, and each one is documented with the experiment that motivated it.
 
-## 功能：海龜交易法則 (Turtle Trading Rules)
+### Bias and robustness controls
 
-獨立於上方五種策略之外的專屬頁面，實作經典的海龜交易法則：
+| Control | Implementation |
+|---|---|
+| **No look-ahead bias** | Every strategy signal is executed with a one-trading-day delay. A signal generated on today's close cannot be traded at today's close. |
+| **Transaction costs** | Configurable per-round-trip cost (%), included in all headline performance metrics (total return, CAGR, Sharpe). Trade-level detail shows raw price return, and the distinction is stated explicitly rather than blurred. |
+| **Benchmark comparison** | Every backtest is reported against buy-and-hold over the identical period, so strategy performance is never presented in isolation. |
+| **Overfitting defense** | The parameter sweep outputs a heatmap across stop-loss × take-profit multiples rather than a single "best" number. The documented guidance is to select a *neighborhood* of adjacent cells that all perform well, not the single highest isolated cell. |
+| **Sample size awareness** | The sweep tests *every historical entry signal* across the stock pool (typically 50–200 signals), not just currently-open positions, because a handful of live positions is not a statistically meaningful sample. |
 
-- **進場**：短期系統為突破過去 20 日高點做多／跌破 20 日低點放空；長期系統為 55 日高／低點版本
-- **加碼（金字塔式）**：價格每往有利方向再推進 0.5N（N = ATR，可調），加碼一單位，最多 4 單位；每單位視為等權重（1/最大單位數）
-- **出場**：短期系統於跌破 10 日低點（多）／突破 10 日高點（空）出場；長期系統為 20 日版本
-- **輸入**：股票代碼＋買入日期（回測起始日）＋結束日期，即可自動畫出所有進出場與加碼點，並計算回測績效（總報酬率、CAGR、夏普比率、最大回檔 MDD、勝率、最高加碼單位數等）
-- 支援放空，這點跟上方五種策略（僅多／空手）不同，因此用獨立的回測引擎（`src/turtle.py`），而非共用 `backtest.py`
-- MDD 計算方式：`(Peak − Trough) ÷ Peak × 100%`，與其他頁面的「最大回檔」相同定義
-- 目前**未實作**原始海龜法則的 2N 停損，僅依使用者指定的進出場規則計算，使用前請留意
-- **長期趨勢濾網（預設開啟）**：用 5/20/60/200 日均線判斷長期趨勢方向，只允許順著趨勢的方向開新倉（多頭時不放空、空頭時不做多），已持有的部位不受影響、仍依原規則出場。兩種嚴格程度：
-  - **簡易**（預設）：收盤價站上/跌破 200 日均線即認定多頭/空頭
-  - **嚴格**：5/20/60/200 日均線需完全依序排列（例如 MA5>MA20>MA60>MA200）才算多頭
-  - 實測台積電 2023/08~2026/08：不開濾網總報酬 83%、放空 7 筆虧 6 筆（拖累 -39%）；簡易濾網總報酬 60%、放空只剩 1 筆；嚴格濾網總報酬降到 31%（因為連正常拉回後的做多訊號也一起被濾掉）。**沒有絕對更好的設定，簡易濾網通常是比較好的起點**，嚴格濾網適合想要更保守、訊號更少的情況
+### Documented experiments
 
-## 功能：停損停利規劃
+These are findings from running the tool, not features:
 
-比海龜法則更簡單的固定停損停利（ATR bracket）計算機，給只想要「進場後設好兩條價位線，碰到哪條就出場」的用法：
+**Trend filter strictness (TSMC, Aug 2023 – Aug 2026).** Comparing three settings on the Turtle system:
 
-- **輸入**：股票代碼、方向（多／空）、買入日期（可留今天，或回填過去日期查歷史結果），進場價預設為當天收盤價、可手動改成實際成交價
-- **輸出**：停損價＝進場價 − 停損倍數×N、停利價＝進場價 + 停利倍數×N（放空方向相反），以及風報比、目前狀態（持有中／已停利／已停損，含觸價日期與報酬率）、附停損停利線與觸價標記的走勢圖
-- 建議停損倍數 2×N、停利倍數 5×N（風報比 1:2.5）起試——實測顯示不對稱的風報比（停利遠大於停損）即使勝率較低，長期報酬仍明顯優於對稱設定，細節見對話紀錄
-- **持有天數上限提醒**（預設開啟，30 天，可調 5-180 天）：這個功能本身沒有時間維度，價格不觸價就會無限期顯示「持有中」，資金可能卡在橫盤股票上很久。超過設定天數還沒觸價時，狀態會變成「已超時」並跳出警示，提醒回來重新評估這筆交易的理由是否還成立——純粹是提醒，不會自動幫你出場。實測台積電近 3 年、固定 2N/5N、每 15 個交易日進場一次的模擬：中位數 18 天內解決，但有 35% 的交易超過 30 天才解決，8% 超過 60 天，所以 30 天的預設門檻會提醒到相當比例的交易，不算少見
-  - 如果想要動態的移動出場（跟著趨勢自動調整出場點），建議改用**海龜交易法則**頁面，那邊有跌破 N 日低點的反向出場規則；這頁刻意保持「兩條固定線」的單純設計，方便直接對照真實下單
-- **持有期間價量表現**：顯示進場後到目前（或到實際觸價那天）為止的交易天數、最大有利變動 (MFE)、最大不利變動 (MAE，依方向調整正負號)、期間最高/最低價，以及持有期間平均成交量相對進場前 20 個交易日均量的變化幅度（判斷量能是放大還是萎縮），並可展開查看逐日價量明細
-- **儲存交易紀錄**：按按鈕即寫入本機 `data/trade_log.csv`（代碼、方向、進場日期/價、N、停損停利倍數與價位、備註），下方會列出所有已存紀錄
-  - 這個檔案**只在本機執行時可靠**；部署到 Streamlit Cloud 等雲端平台後，檔案系統通常是暫時性的，重新部署或休眠喚醒後可能會消失，不要拿雲端版本當長期記錄用
-  - `data/trade_log.csv` 已加入 `.gitignore`，不會被提交進版本控制（交易紀錄是個人資料）
+| Setting | Total return | Short trades |
+|---|---|---|
+| No filter | 83% | 7 trades, 6 losses (−39% drag) |
+| Simple (price vs MA200) | 60% | 1 trade |
+| Strict (MA5 > MA20 > MA60 > MA200) | 31% | — |
 
-## 功能：X KOL 動態
+The strict filter also removes valid long entries after normal pullbacks. Conclusion recorded in the docs: no setting is universally better; the simple filter is the better default, the strict filter suits a more conservative, lower-frequency posture.
 
-- 讀取使用者提供、公開分享的 [Google Sheet KOL 名單](https://docs.google.com/spreadsheets/d/1GByalwK-RUT0p4_ydFsTydHeun6Wwo825C5XyILm3IM)（姓名／連結／簡介／粉絲數），以公開 CSV 匯出網址讀取，不需金鑰
-- 設定 X API Bearer Token 後，可選擇特定 KOL 抓取最新貼文（見下方「設定 X API 金鑰」）
-- **不會做未經授權的爬蟲**：X 對非官方存取的防爬機制很嚴格，本專案只走官方 X API v2，沒有金鑰就只顯示名單、不抓貼文
+**Stop-loss / take-profit sweep (Taiwan equities, MA cross 20/60, 2023–2026).** Across 194 historical entry signals, the best combination was 3.0N / 6.0N (avg +4.29%, 53.8% win rate), with a consistent trend that wider stops produced higher average returns. This independently corroborated an earlier manual finding that a 2N stop is too tight for some tickers and gets shaken out by normal pullbacks.
 
-### 設定 X API 金鑰
+**Holding-period distribution.** The fixed stop/target planner has no time dimension, so a position can sit unresolved indefinitely. Measuring TSMC over three years (fixed 2N/5N, entering every 15 trading days): median resolution was 18 days, but 35% of trades took over 30 days and 8% took over 60. The 30-day timeout warning default was chosen from this distribution rather than picked arbitrarily.
 
-1. 到 [developer.x.com](https://developer.x.com) 申請開發者帳號，取得 Bearer Token（注意：有意義的讀取量通常需要付費方案，免費額度非常有限，請以官網當下公告的方案為準）
-2. 複製 `.streamlit/secrets.toml.example` 為 `.streamlit/secrets.toml`，填入：
-   ```toml
-   [x_api]
-   bearer_token = "你的 token"
-   ```
-3. `secrets.toml` 已加入 `.gitignore`，不會被提交進版本控制
-4. 部署到 Streamlit Community Cloud 時，改到該 App 的 **Settings → Secrets** 貼上同樣內容
+**Screener ranking design.** The original ranking sorted by "largest gain since signal," which structurally surfaces stocks that have *already* run. Tested on TSMC with MA cross, the top-ranked result was a signal triggered 399 days earlier — the move was long over. Re-sorting by holding days ascending returned a signal triggered 5 days prior with only 0.6% gain: an actual emerging opportunity. Both sort modes are retained, because "confirm momentum" and "find new entries" are different questions.
 
-## 專案結構
+---
+
+## Features
+
+**Strategy backtesting** — Five configurable strategies (MA cross, RSI mean-reversion, MACD, Bollinger Bands, ATR channel breakout) across Taiwan (`.TW`) and US tickers. Outputs total return, CAGR, Sharpe ratio, max drawdown, win rate, and profit factor against buy-and-hold, with interactive Plotly candlestick charts, equity curves, drawdown plots, and per-trade detail.
+
+**Turtle Trading system** — A separate long/short ATR breakout engine implementing the classic rules: 20/55-day breakout entries, pyramid scaling at 0.5N intervals up to 4 units, 10/20-day exits. Runs on its own backtest engine (`src/turtle.py`) rather than sharing `backtest.py`, because the main engine is long/flat only and cannot represent shorts. Includes an optional long-term trend filter with two strictness levels.
+
+**Trade planner** — Fixed ATR bracket calculator (stop = entry − k×N, target = entry + m×N) with risk/reward ratio, current status, MFE/MAE over the holding period, volume behavior versus the 20-day pre-entry average, and optional local trade logging.
+
+**Screener** — Scans 30 Taiwan and 30 US tickers for active entry signals under the selected strategy, ranked by either "newly triggered" or "strongest momentum." Selected tickers can be pushed to batch stop/target simulation.
+
+**Parameter sweep** — Batch-tests multiple stop/target multiple combinations across all historical signals in the pool, output as a heatmap plus a ranked detail table.
+
+**KOL feed** — Reads a publicly shared Google Sheet of finance commentators via its CSV export URL (no API key required). Post fetching uses the official X API v2 only — the project does not scrape X, and without a token it simply displays the list.
+
+---
+
+## Architecture
 
 ```
-app.py                  Streamlit 主程式（UI 組裝、頁面切換）
+app.py                  Streamlit UI — page routing and layout composition
 src/
-  data_loader.py        股票資料下載（yfinance）與代碼正規化
-  indicators.py          技術指標（MA、RSI、MACD、布林通道、ATR）
-  strategies.py          五種策略的訊號邏輯與參數定義
-  backtest.py             向量化回測引擎與績效指標
-  charts.py                Plotly 圖表產生
-  screener.py              跨股票掃描熱門強勢股排行
-  fundamentals.py          Yahoo Finance 基本面財務數據
-  kol_feed.py              X KOL 名單讀取與貼文抓取（X API v2）
-  turtle.py                 海龜交易法則：多空訊號、加碼模擬、獨立回測引擎
-  trade_planner.py          停損停利規劃：ATR bracket 計算、觸價判斷、本機交易紀錄存取
-.streamlit/
-  config.toml            主題與伺服器設定
-  secrets.toml.example   X API 金鑰設定範本（複製為 secrets.toml 後填入）
-data/
-  trade_log.csv          停損停利規劃頁的本機交易紀錄（不會被提交進版本控制）
-requirements.txt
+  data_loader.py        Price data download (yfinance) and ticker normalization
+  indicators.py         Technical indicators (MA, RSI, MACD, Bollinger, ATR)
+  strategies.py         Signal logic and parameter definitions for five strategies
+  backtest.py           Vectorized backtest engine and performance metrics
+  charts.py             Plotly chart generation
+  screener.py           Cross-ticker scanning and ranking
+  param_scan.py         Batch stop/target parameter sweep across historical signals
+  fundamentals.py       Yahoo Finance fundamentals (ratios, statements, ratings)
+  turtle.py             Turtle rules: long/short signals, pyramiding, separate engine
+  trade_planner.py      ATR bracket calculation, trigger detection, local trade log
+  kol_feed.py           KOL list loading and X API v2 post fetching
 ```
 
-## 本機執行
+Two implementation notes worth flagging:
 
-需要 Python 3.9+。
+- **Indicators are implemented in pure pandas**, deliberately avoiding TA-Lib and other C-extension dependencies, so the app deploys to Streamlit Community Cloud without build issues.
+- **Fundamentals use Yahoo Finance only.** Futu (富途牛牛) has no public API — it requires a locally installed and authenticated OpenD gateway, which breaks once the app is deployed to the cloud. Yahoo was chosen for deployability, accepting reduced data coverage.
+
+---
+
+## Setup
+
+Requires Python 3.9+.
 
 ```bash
 python3 -m venv venv
@@ -101,34 +96,25 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-啟動後瀏覽器會自動開啟（預設 `http://localhost:8501`，可用 `--server.port` 指定其他埠號）。
+Opens at `http://localhost:8501`.
 
-## 部署到 Streamlit Community Cloud（免費）
+**Optional — X API access:** copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` and add a Bearer Token from [developer.x.com](https://developer.x.com). `secrets.toml` is gitignored. On Streamlit Cloud, use Settings → Secrets instead. Posts are only fetched on an explicit button press, to avoid burning API quota on every page rerun.
 
-1. 把整個專案推上 GitHub（可以是 public repo）
-2. 到 [share.streamlit.io](https://share.streamlit.io) 用 GitHub 帳號登入
-3. 點 **New app**，選擇這個 repo、分支，Main file path 填 `app.py`
-4. 按 **Deploy**，等待安裝相依套件（約 1-3 分鐘）即可取得公開網址
+---
 
-之後每次 `git push` 到該分支，Streamlit Cloud 會自動重新部署。
+## Limitations
 
-## 策略說明
+- **The main backtest engine is long/flat only** (0/1 position), with no shorting or leverage. Shorts are only available on the Turtle page, via the separate engine.
+- **The Turtle implementation omits the original 2N stop-loss rule.** Exits follow only the N-day breakout rule and any user-specified bracket. This is a deliberate, documented deviation, not an oversight — but it means results are not directly comparable to the canonical Turtle system.
+- **Parameter sweep results are in-sample historical simulation** and carry overfitting risk. No walk-forward or out-of-sample holdout is implemented; the heatmap-neighborhood heuristic is a mitigation, not a substitute.
+- **Local trade log is not durable in cloud deployment.** `data/trade_log.csv` relies on a persistent filesystem; Streamlit Cloud's is ephemeral and will lose records on redeploy or sleep/wake.
+- **Fundamentals coverage is limited** to commonly used line items from Yahoo Finance, filtered to avoid information overload.
+- **X integration is not implemented beyond the official API**, and meaningful read volume on X requires a paid tier.
 
-| 策略 | 邏輯 |
-| --- | --- |
-| 均線交叉 (MA Cross) | 短期均線由下往上穿越長期均線時做多，跌破時出場 |
-| RSI 超買超賣 | RSI 跌破超賣線進場，站上超買線出場（均值回歸） |
-| MACD | MACD 線穿越訊號線判斷動能轉折 |
-| 布林通道 | 價格向上突破下軌進場（觸底反彈），觸及上軌出場 |
-| ATR 通道突破 | 以 EMA 為中軌、ATR 為通道寬度，價格突破上軌進場、跌破下軌出場 |
+---
 
-所有策略訊號皆延遲一個交易日才執行（避免使用未來資料），並可在側欄設定每次進出場的交易成本（%）。
+## Data sources
 
-## 技術重點
+Price data via [yfinance](https://github.com/ranaroussi/yfinance) (Yahoo Finance). Fundamentals via Yahoo Finance. KOL list via a publicly shared Google Sheet CSV export. Social posts via the official X API v2.
 
-- 股價資料來自 [yfinance](https://github.com/ranaroussi/yfinance)（Yahoo Finance），台股用 `.TW` 後綴、美股直接用代碼
-- 回測為長多／空手（0/1）的向量化回測，不含放空與槓桿
-- 交易明細顯示的報酬率為進出場價格的原始報酬（未扣成本），整體績效指標（總報酬率、CAGR 等）已計入交易成本
-- 熱門強勢股排行採批次下載（`yfinance` 多代碼一次請求）以加速掃描，「訊號後漲幅」＝該股票目前策略訊號觸發進場那天至今的價格漲幅，只有目前正處於進場訊號中的股票才會列入排行
-- 財務數據的三大財報只挑常用項目顯示（避免資訊過載），數字自動換算成萬／億／兆
-- X KOL 名單透過 Google Sheet 的公開 CSV 匯出網址讀取（`.../export?format=csv&gid=0`），不需要 Google API；抓取貼文需要使用者自行選擇 KOL 並按按鈕才會呼叫 X API，避免每次頁面重整就消耗 API 額度
+No unauthorized scraping is performed anywhere in this project.

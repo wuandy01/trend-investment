@@ -421,3 +421,30 @@ def build_bracket_chart(
     )
     fig.update_yaxes(title_text="價格")
     return fig
+
+
+def build_param_heatmap(scan_df: pd.DataFrame, value_col: str, title: str) -> go.Figure:
+    """停損停利參數掃描結果的熱力圖：X 軸停利倍數、Y 軸停損倍數、色階為指定欄位（例如平均報酬率）。"""
+    pivot = scan_df.pivot(index="停損倍數", columns="停利倍數", values=value_col).sort_index(ascending=False)
+    text = pivot.map(lambda v: f"{v * 100:.1f}%" if pd.notna(v) else "")
+
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=pivot.values,
+            x=[str(c) for c in pivot.columns],
+            y=[str(i) for i in pivot.index],
+            text=text.values,
+            texttemplate="%{text}",
+            colorscale="RdYlGn",
+            zmid=0,
+            colorbar=dict(title=title, tickformat=".0%"),
+            hovertemplate="停損 %{y}N｜停利 %{x}N<br>" + title + ": %{z:.2%}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        height=420,
+        margin=dict(l=10, r=10, t=30, b=10),
+        xaxis_title="停利倍數（×N）",
+        yaxis_title="停損倍數（×N）",
+    )
+    return fig

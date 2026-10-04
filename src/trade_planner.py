@@ -30,7 +30,20 @@ TRADE_LOG_COLUMNS = [
     "停利倍數",
     "停損價",
     "停利價",
+    "股數",
+    "進場理由",
     "備註",
+]
+
+# 舊版紀錄沒有「股數」與「進場理由」欄位，load_trade_log() 會補上空值，
+# 不需要手動改既有的 CSV。
+ENTRY_REASONS = [
+    "突破整理",
+    "回檔支撐",
+    "均線多頭排列",
+    "強勢股排行選入",
+    "基本面轉佳",
+    "其他",
 ]
 
 
@@ -49,6 +62,58 @@ def compute_bracket(
         "停損價": stop_price,
         "停利價": target_price,
         "風報比": target_mult / stop_mult if stop_mult > 0 else float("nan"),
+    }
+
+
+def compute_position_size(
+    capital: float,
+    risk_pct: float,
+    entry_price: float,
+    stop_price: float,
+    lot_size: int = 1,
+) -> dict | None:
+    """固定比例風險部位計算 (fixed fractional position sizing)。
+
+    核心概念：先決定「這筆交易最多願意虧多少錢」，再由停損距離反推該買多少股，
+    而不是先決定買多少股、再看會虧多少。
+
+        部位股數 = (總資金 × 單筆風險%) ÷ (進場價 − 停損價)
+
+    這樣不論停損設得寬或窄，每筆交易的風險金額都一樣。這件事很重要，因為
+    參數掃描的結論是「3N 停損通常優於 2N」，但如果部位大小不跟著調整，
+    單純把停損拉寬只會讓每次虧損變大——寬停損要能用，必須搭配這個計算。
+
+    lot_size：台股整張交易為 1000（零股為 1），美股為 1。不足一個單位的部分
+    無條件捨去，所以實際風險金額會略低於預算。
+    """
+    stop_distance = abs(entry_price - stop_price)
+    if stop_distance <= 0 or capital <= 0 or risk_pct <= 0 or entry_price <= 0:
+        return None
+
+    risk_budget = capital * risk_pct
+    raw_shares = risk_budget / stop_distance
+    shares = int(raw_shares // lot_size) * lot_size
+
+    if shares <= 0:
+        return {
+            "風險預算": risk_budget,
+            "每股風險": stop_distance,
+            "建議股數": 0,
+            "部位市值": 0.0,
+            "佔用資金比例": 0.0,
+            "實際風險金額": 0.0,
+            "資金不足": True,
+        }
+
+    position_value = shares * entry_price
+    return {
+        "風險預算": risk_budget,
+        "每股風險": stop_distance,
+        "建議股數": shares,
+        "部位市值": position_value,
+        "佔用資金比例": position_value / capital,
+        "實際風險金額": shares * stop_distance,
+        "資金不足": position_value > capital,
     }
 
 
@@ -172,9 +237,114 @@ def summarize_holding_period(
 
 
 def load_trade_log() -> pd.DataFrame:
+    """讀取交易紀錄。舊版檔案缺少的欄位會自動補上空值，不需要手動改 CSV。"""
     if not TRADE_LOG_PATH.exists():
         return pd.DataFrame(columns=TRADE_LOG_COLUMNS)
-    return pd.read_csv(TRADE_LOG_PATH, parse_dates=["進場日期"])
+    df = pd.read_csv(TRADE_LOG_PATH, parse_dates=["進場日期"])
+    for col in TRADE_LOG_COLUMNS:
+        if col not in df.columns:
+            df[col] = pd.NA
+    return df[TRADE_LOG_COLUMNS]
+
+
+def evaluate_trade_log(
+    log: pd.DataFrame,
+    price_data: dict[str, pd.DataFrame],
+    max_hold_days: int | None = None,
+) -> pd.DataFrame:
+    """對交易紀錄裡的每一筆，用最新價格資料重新判斷目前狀態。
+
+    price_data：{代碼: 價格 DataFrame}，由呼叫端負責下載（這個模組刻意不碰網路）。
+    缺少價格資料的標的狀態會標成「無資料」，不會讓整張表失敗。
+
+    「距停損」欄位是給未平倉部位看的——數字越小代表越接近被停損出場，
+    可以據此排序，一眼看出哪些部位最危險。
+    """
+    if log.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for _, r in log.iterrows():
+        ticker = r["代碼"]
+        entry_date = pd.to_datetime(r["進場日期"]).date()
+        entry_price = float(r["進場價"])
+        stop_price = float(r["停損價"])
+        target_price = float(r["停利價"])
+        direction = r["方向"]
+
+        df = price_data.get(ticker)
+        if df is None or df.empty:
+            rows.append({
+                "代碼": ticker, "方向": direction, "進場日期": entry_date,
+                "進場價": entry_price, "停損價": stop_price, "停利價": target_price,
+                "現價": None, "狀態": "無資料", "報酬率": None,
+                "持有天數": None, "距停損": None, "股數": r.get("股數"),
+                "部位市值": None, "進場理由": r.get("進場理由"), "備註": r.get("備註"),
+            })
+            continue
+
+        outcome = check_bracket_outcome(
+            df, entry_date, entry_price, stop_price, target_price,
+            direction, max_hold_days=max_hold_days,
+        )
+        current_price = outcome["觸價價格"]
+
+        # 距停損：現價還要往不利方向走多少 % 才會觸及停損。已平倉的不適用。
+        distance_to_stop = None
+        if outcome["狀態"] in ("持有中", "已超時") and current_price:
+            if direction == "多":
+                distance_to_stop = (current_price - stop_price) / current_price
+            else:
+                distance_to_stop = (stop_price - current_price) / current_price
+
+        shares = r.get("股數")
+        shares = float(shares) if pd.notna(shares) else None
+        rows.append({
+            "代碼": ticker,
+            "方向": direction,
+            "進場日期": entry_date,
+            "進場價": entry_price,
+            "停損價": stop_price,
+            "停利價": target_price,
+            "現價": round(current_price, 2) if current_price else None,
+            "狀態": outcome["狀態"],
+            "報酬率": outcome["報酬率"],
+            "持有天數": outcome["持有天數"],
+            "距停損": distance_to_stop,
+            "股數": shares,
+            "部位市值": round(shares * current_price, 2) if shares and current_price else None,
+            "進場理由": r.get("進場理由"),
+            "備註": r.get("備註"),
+        })
+
+    return pd.DataFrame(rows)
+
+
+OPEN_STATUSES = ("持有中", "已超時")
+CLOSED_STATUSES = ("已停利", "已停損")
+
+
+def summarize_by_reason(evaluated: pd.DataFrame) -> pd.DataFrame:
+    """依進場理由彙總已平倉交易的表現。
+
+    這是決策日誌的重點：看見自己哪一類判斷長期是賺的、哪一類是賠的。
+    樣本數少的時候不要過度解讀，所以筆數一併列出。
+    """
+    if evaluated.empty:
+        return pd.DataFrame()
+
+    closed = evaluated[evaluated["狀態"].isin(CLOSED_STATUSES)].copy()
+    if closed.empty:
+        return pd.DataFrame()
+
+    closed["進場理由"] = closed["進場理由"].fillna("(未填)")
+    grouped = closed.groupby("進場理由").agg(
+        筆數=("報酬率", "size"),
+        勝率=("狀態", lambda s: (s == "已停利").mean()),
+        平均報酬率=("報酬率", "mean"),
+        平均持有天數=("持有天數", "mean"),
+    ).reset_index()
+    return grouped.sort_values("筆數", ascending=False)
 
 
 def append_trade_record(record: dict) -> None:
