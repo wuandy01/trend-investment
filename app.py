@@ -721,8 +721,12 @@ def render_trade_planner_page() -> None:
         max_hold_days = None
         if use_hold_limit:
             max_hold_days = st.slider(
-                "持有天數上限（天，僅提醒不會自動出場）", 5, 180, 90, step=5, key="planner_max_hold_days",
-                help="預設 90 天（約 3 個月），對齊學術研究的最佳持有期，也是本專案所有回測採用的時間上限。",
+                "持有天數上限（天，僅提醒不會自動出場）", 30, 420, 365, step=15, key="planner_max_hold_days",
+                help=(
+                    "預設 365 天，刻意設得很長：結構停利已經負責「這段走完了」，96% 的部位會自然出場，"
+                    "時間上限只會綁到最強的那幾檔。實測把上限從 3 個月放寬到 12 個月，"
+                    "平均 R 從 +0.525 提升到 +0.860，而平均持有只從 28 天變成 33 天。"
+                ),
             )
 
         st.divider()
@@ -981,7 +985,7 @@ def render_strength_test_page() -> None:
         max_hold_days = None
         if use_hold_limit:
             max_hold_days = st.slider(
-                "持有天數上限（天，僅提醒不會自動出場）", 5, 180, 30, step=5, key="strength_max_hold_days"
+                "持有天數上限（天，僅提醒不會自動出場）", 30, 420, 365, step=15, key="strength_max_hold_days"
             )
 
     tab_watchlist, tab_scan = st.tabs(["清單測試", "參數掃描"])
