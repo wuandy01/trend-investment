@@ -365,11 +365,14 @@ def build_bracket_chart(
     entry_date,
     entry_price: float,
     stop_price: float,
-    target_price: float,
+    target_price: float | None,
     outcome: dict,
     title: str,
 ) -> go.Figure:
-    """停損停利規劃圖：K 線 + 進場點 + 停損／停利水平線 + 觸價標記（若已觸價）。"""
+    """停損停利規劃圖：K 線 + 進場點 + 停損／停利水平線 + 觸價標記（若已觸價）。
+
+    target_price 為 None 代表用的是結構停利——沒有固定價位可畫，只畫停損線。
+    """
     fig = go.Figure()
 
     fig.add_trace(
@@ -388,7 +391,10 @@ def build_bracket_chart(
     )
 
     fig.add_hline(y=stop_price, line=dict(color=STOP_COLOR, width=1.5, dash="dash"), annotation_text="停損")
-    fig.add_hline(y=target_price, line=dict(color=TARGET_COLOR, width=1.5, dash="dash"), annotation_text="停利")
+    if target_price is not None:
+        fig.add_hline(
+            y=target_price, line=dict(color=TARGET_COLOR, width=1.5, dash="dash"), annotation_text="停利"
+        )
 
     fig.add_trace(
         go.Scatter(

@@ -1041,7 +1041,29 @@ def render_strength_test_page() -> None:
         st.caption("套用到「清單測試」分頁的標的，規則跟「停損停利規劃」頁面相同。")
         atr_period = st.slider("ATR 天數 (N)", 5, 50, 20, step=1, key="strength_atr_period")
         stop_mult = st.slider("停損倍數（×N）", 0.5, 5.0, 2.0, step=0.5, key="strength_stop_mult")
-        target_mult = st.slider("停利倍數（×N）", 0.5, 10.0, 5.0, step=0.5, key="strength_target_mult")
+        exit_style = st.radio(
+            "停利方式",
+            ["結構停利（推薦）", "固定 N 倍數"],
+            key="strength_exit_style",
+            help="跟「停損停利規劃」頁面相同。固定倍數到價就出，結構停利等技術訊號轉弱才走。",
+        )
+        target_mult = 5.0
+        structural_exit = None
+        min_profit_n = 1.0
+        if exit_style.startswith("結構"):
+            structural_exit = st.selectbox(
+                "結構停利訊號",
+                list(trade_planner.STRUCTURAL_EXITS.keys()),
+                key="strength_structural_exit",
+            )
+            st.caption(trade_planner.STRUCTURAL_EXITS[structural_exit]["說明"])
+            min_profit_n = st.slider(
+                "獲利達幾個 N 才啟動停利", 0.0, 2.0, 1.0, step=0.5, key="strength_min_profit_n"
+            )
+        else:
+            target_mult = st.slider(
+                "停利倍數（×N）", 0.5, 10.0, 5.0, step=0.5, key="strength_target_mult"
+            )
         st.divider()
         use_hold_limit = st.checkbox("啟用持有天數上限提醒", value=True, key="strength_use_hold_limit")
         max_hold_days = None
@@ -1053,13 +1075,22 @@ def render_strength_test_page() -> None:
     tab_watchlist, tab_scan = st.tabs(["清單測試", "參數掃描"])
 
     with tab_watchlist:
-        _render_watchlist_test_tab(atr_period, stop_mult, target_mult, max_hold_days)
+        _render_watchlist_test_tab(
+            atr_period, stop_mult, target_mult, max_hold_days, structural_exit, min_profit_n
+        )
 
     with tab_scan:
         _render_param_scan_tab()
 
 
-def _render_watchlist_test_tab(atr_period: int, stop_mult: float, target_mult: float, max_hold_days: int | None) -> None:
+def _render_watchlist_test_tab(
+    atr_period: int,
+    stop_mult: float,
+    target_mult: float,
+    max_hold_days: int | None,
+    structural_exit: str | None = None,
+    min_profit_n: float = 1.0,
+) -> None:
     watchlist = st.session_state.get("strength_test_watchlist", {})
 
     if not watchlist:
@@ -1113,15 +1144,21 @@ def _render_watchlist_test_tab(atr_period: int, stop_mult: float, target_mult: f
                     skipped.append(f"{ticker}（資料不足以算 ATR）")
                     continue
                 bracket = trade_planner.compute_bracket(entry_price, n_atr, "多", stop_mult, target_mult)
-                outcome = trade_planner.check_bracket_outcome(
-                    price_df,
-                    entry_date,
-                    entry_price,
-                    bracket["停損價"],
-                    bracket["停利價"],
-                    "多",
-                    max_hold_days=max_hold_days,
-                )
+                if structural_exit:
+                    outcome = trade_planner.check_structural_outcome(
+                        price_df, entry_date, entry_price, bracket["停損價"], structural_exit,
+                        n_atr, min_profit_n=min_profit_n, max_hold_days=max_hold_days,
+                    )
+                else:
+                    outcome = trade_planner.check_bracket_outcome(
+                        price_df,
+                        entry_date,
+                        entry_price,
+                        bracket["停損價"],
+                        bracket["停利價"],
+                        "多",
+                        max_hold_days=max_hold_days,
+                    )
                 latest_price = float(price_df["Close"].iloc[-1])
                 results.append(
                     {
@@ -1133,10 +1170,14 @@ def _render_watchlist_test_tab(atr_period: int, stop_mult: float, target_mult: f
                         "現價": round(latest_price, 2),
                         "N (ATR)": round(n_atr, 2),
                         "停損價": round(bracket["停損價"], 2),
-                        "停利價": round(bracket["停利價"], 2),
+                        # 結構停利沒有固定價位，用訊號名稱取代，免得顯示一個不存在的目標價。
+                        "停利": structural_exit or f"{bracket['停利價']:,.2f}",
                         "狀態": outcome["狀態"],
                         "持有天數": outcome["持有天數"],
                         "報酬率": outcome["報酬率"],
+                        "_停利價": bracket["停利價"] if not structural_exit else None,
+                        "_結構停利": structural_exit,
+                        "_min_profit_n": min_profit_n,
                     }
                 )
         st.session_state["strength_test_results"] = pd.DataFrame(results)
@@ -1157,11 +1198,14 @@ def _render_watchlist_test_tab(atr_period: int, stop_mult: float, target_mult: f
         st.caption(
             "🔴 已停損、🟢 已停利、🟡 已超時的列會整列上色。點選任一列可在下方展開該檔的走勢圖。"
         )
-        display_results = mark_status(results_df)
+        # 底線開頭的欄位是給下方走勢圖用的內部欄位，不顯示在表格裡。
+        display_results = mark_status(results_df.drop(columns=[
+            c for c in results_df.columns if c.startswith("_")
+        ]))
         display_results["報酬率"] = display_results["報酬率"].map(
             lambda v: f"{v:+.2%}" if pd.notna(v) else "—"
         )
-        for col in ("進場價", "現價", "停損價", "停利價", "N (ATR)"):
+        for col in ("進場價", "現價", "停損價", "N (ATR)"):
             display_results[col] = display_results[col].map(
                 lambda v: f"{v:,.2f}" if pd.notna(v) else "—"
             )
@@ -1189,7 +1233,7 @@ def _render_watchlist_test_tab(atr_period: int, stop_mult: float, target_mult: f
             col2.metric("勝率（已解決中）", f"{win_rate * 100:.1f}%")
             col3.metric("平均報酬率（已解決中）", f"{avg_return * 100:+.2f}%")
         st.caption(
-            "「狀態」為套用固定 2N/5N（或側欄自訂倍數）停損停利規則後、以「進場日期」與「進場價格」"
+            "「狀態」為套用側欄設定的停損停利規則後、以「進場日期」與「進場價格」"
             "（皆來自熱門強勢股掃描結果）模擬至今的結果；「已超時」代表沒觸價但已超過持有天數上限，"
             "純粹是提醒，不代表已出場。不代表未來績效。"
         )
@@ -1213,21 +1257,34 @@ def _render_strength_detail_chart(
         st.warning(f"查無 {ticker} 的價格資料。")
         return
 
-    outcome = trade_planner.check_bracket_outcome(
-        price_df, entry_date, entry_price, float(row["停損價"]), float(row["停利價"]), "多",
-        max_hold_days=max_hold_days,
-    )
+    stop_price = float(row["停損價"])
+    structural_exit = row.get("_結構停利")
+    target_price = row.get("_停利價")
+
+    if structural_exit:
+        outcome = trade_planner.check_structural_outcome(
+            price_df, entry_date, entry_price, stop_price, structural_exit,
+            float(row["N (ATR)"]), min_profit_n=float(row.get("_min_profit_n", 1.0)),
+            max_hold_days=max_hold_days,
+        )
+    else:
+        outcome = trade_planner.check_bracket_outcome(
+            price_df, entry_date, entry_price, stop_price, float(target_price), "多",
+            max_hold_days=max_hold_days,
+        )
 
     st.markdown(f"**{ticker}　{row['名稱']}**")
     cols = st.columns(5)
     cols[0].metric("進場價", f"{currency}{entry_price:,.2f}")
     cols[1].metric("現價", f"{currency}{float(row['現價']):,.2f}")
-    cols[2].metric("停損價", f"{currency}{float(row['停損價']):,.2f}")
-    cols[3].metric("停利價", f"{currency}{float(row['停利價']):,.2f}")
+    cols[2].metric("停損價", f"{currency}{stop_price:,.2f}")
+    cols[3].metric("停利", structural_exit if structural_exit else f"{currency}{float(target_price):,.2f}")
     cols[4].metric("狀態", row["狀態"])
 
     fig = charts.build_bracket_chart(
-        price_df, entry_date, entry_price, float(row["停損價"]), float(row["停利價"]), outcome, ticker
+        price_df, entry_date, entry_price, stop_price,
+        float(target_price) if target_price is not None and pd.notna(target_price) else None,
+        outcome, ticker,
     )
     st.plotly_chart(fig, use_container_width=True, key=f"strength_chart_{ticker}")
 
