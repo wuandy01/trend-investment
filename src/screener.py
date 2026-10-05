@@ -27,6 +27,10 @@ RS_LOOKBACK = 120
 EXTENSION_MA = 20
 HIGH_LOOKBACK = 250
 
+# 結構停利用的均線天數，跟 trade_planner 的「跌破 50 日均線」一致。
+# 「距 50MA」＝買進後到系統叫你出場之間還有多少緩衝空間。
+EXIT_MA = 50
+
 # 大盤環境濾網：指數與判斷用的均線天數。
 MARKET_INDEX = {"台股": "^TWII", "美股": "^GSPC"}
 REGIME_MA = 200
@@ -77,14 +81,16 @@ def _strength_metrics(price_data: dict[str, pd.DataFrame]) -> pd.DataFrame:
         if past <= 0 or ma != ma or ma <= 0:
             continue
         year_high = float(df["High"].iloc[-HIGH_LOOKBACK:].max())
+        exit_ma = close.rolling(EXIT_MA).mean().iloc[-1]
         rows.append({
             "代碼": ticker,
             "半年報酬": close.iloc[-1] / past - 1,
             "乖離率": close.iloc[-1] / ma - 1,
             "距52週高": close.iloc[-1] / year_high - 1 if year_high > 0 else float("nan"),
+            "距50MA": close.iloc[-1] / exit_ma - 1 if exit_ma == exit_ma and exit_ma > 0 else float("nan"),
         })
     if not rows:
-        return pd.DataFrame(columns=["代碼", "半年報酬", "乖離率", "距52週高", "相對強弱"])
+        return pd.DataFrame(columns=["代碼", "半年報酬", "乖離率", "距52週高", "距50MA", "相對強弱"])
 
     metrics = pd.DataFrame(rows)
     metrics["相對強弱"] = metrics["半年報酬"].rank(pct=True)
