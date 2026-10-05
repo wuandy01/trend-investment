@@ -55,6 +55,7 @@ def format_ranking_table(df):
     for col, fmt in [
         ("訊號前漲幅", "{:.1f}%"),
         ("乖離率", "{:+.1f}%"),
+        ("距52週高", "{:+.1f}%"),
         ("半年報酬", "{:+.1f}%"),
         ("相對強弱", "前 {:.0f}%"),
     ]:
@@ -398,22 +399,43 @@ def render_backtest_page() -> None:
                 help="設 30 代表只保留近半年報酬排在掃描池前 30% 的股票。",
             )
             min_rs = 1 - min_rs / 100
-        use_extension_filter = st.checkbox(
-            "排除短線追高（乖離率濾網）",
+        use_high_filter = st.checkbox(
+            "只看接近 52 週高點的股票",
             value=True,
+            key="ranking_use_high_filter",
+            help=(
+                "實測中最強的單一篩選指標。在半年報酬前 30% 的母體裡，套用實際交易規則後，"
+                "距高點 3% 以內平均 +1.491R、低於高點 10~25% 只有 +0.569R、低於 25% 以上只有 +0.388R。"
+                "「還有續漲空間」的實際樣貌是正在創新高，不是回檔整理。"
+            ),
+        )
+        max_below_high = None
+        if use_high_filter:
+            # 用整數百分比當滑桿單位，顯示才會是「10」而不是「0.10」；傳進濾網前再換回小數。
+            max_below_high = st.slider(
+                "距 52 週高點最多低於（%）", 2, 30, 10, step=1, key="ranking_max_below_high"
+            ) / 100
+            st.caption(
+                "設 10% 代表只保留「現價在 52 週高點 10% 以內」的股票。設 3% 會只剩正在創新高的，"
+                "數量少但實測表現最好。"
+            )
+
+        use_extension_filter = st.checkbox(
+            "排除短線追高（乖離率濾網，不建議開啟）",
+            value=False,
             key="ranking_use_extension_filter",
             help=(
-                f"乖離率＝現價距離 {screener.EXTENSION_MA} 日均線多遠。這取代了舊的「距 60 日低點漲幅」濾網——"
-                "強勢股必然遠離 60 日低點（實測會把相對強弱前 30% 的 61 檔擋掉 59 檔），"
-                "但強勢股回檔到短期均線附近時乖離率很小，那正是不追高的進場點。兩者衡量的時間尺度不同。"
+                f"乖離率＝現價距離 {screener.EXTENSION_MA} 日均線多遠。"
+                "⚠️ 實測顯示這道濾網幫倒忙：越延伸的未來表現越好（高於 20MA 20% 以上 +1.087R、"
+                "高於 0~8% 只有 +0.907R、低於 20MA 更只有 +0.427R）。動能是「買高、賣更高」，"
+                "刻意挑回檔等於挑動能正在衰退的那一群。保留這個選項只是為了讓你自己比較。"
             ),
         )
         max_extension = None
         if use_extension_filter:
-            # 用整數百分比當滑桿單位，顯示才會是「8」而不是「0.08」；傳進濾網前再換回小數。
             max_extension = st.slider(
                 f"乖離率上限（%，距 {screener.EXTENSION_MA} 日均線）",
-                2, 20, 8, step=1, key="ranking_max_extension",
+                2, 30, 8, step=1, key="ranking_max_extension",
             ) / 100
         max_runup = None
 
@@ -471,6 +493,7 @@ def render_backtest_page() -> None:
                     max_age_days=max_age_days,
                     min_rs=min_rs,
                     max_extension=max_extension,
+                    max_below_high=max_below_high,
                     require_bull_regime=require_bull,
                 )
                 filter_notes = []
@@ -478,6 +501,8 @@ def render_backtest_page() -> None:
                     filter_notes.append(f"大盤空頭期擋掉 {stats['大盤空頭濾掉']} 檔")
                 if stats["不夠強濾掉"]:
                     filter_notes.append(f"相對強弱不足擋掉 {stats['不夠強濾掉']} 檔")
+                if stats["離高點太遠濾掉"]:
+                    filter_notes.append(f"距高點超過 {max_below_high:.0%} 擋掉 {stats['離高點太遠濾掉']} 檔")
                 if stats["追高濾掉"]:
                     filter_notes.append(f"乖離超過 {max_extension:.0%} 擋掉 {stats['追高濾掉']} 檔")
                 if stats["太舊濾掉"]:
