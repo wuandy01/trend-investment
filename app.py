@@ -441,18 +441,25 @@ def render_backtest_page() -> None:
 
         use_age_filter = st.checkbox(
             "只看最近觸發的新訊號（訊號年齡濾網）",
-            value=False,
+            value=True,
             key="ranking_use_age_filter",
             help=(
-                "搭配「剛觸發訊號」排序時才需要開——不設上限的話，候選不足時排行榜會拿幾個月前的"
-                "舊訊號補滿前 10 名，而舊訊號不會變，看起來就像永遠是那幾檔。\n\n"
-                "但搭配「相對強弱」排序時建議關閉：強勢股是不是最近才穿越均線並不重要，"
-                "重要的是它現在夠強、而且沒有短線追高。實測開著這道濾網會把候選從 10 檔砍到 2 檔。"
+                "這是決定排行榜「能不能現在進場」的關鍵開關。關掉的話，候選不足時會拿幾個月前的"
+                "舊訊號補滿名單——那些訊號的漲幅早就跑完了（訊號後漲幅動輒 40-60%），"
+                "看到也來不及進場。\n\n"
+                "上面三道濾網（大盤 200MA、相對強弱、距 52 週高點）看的是長期趨勢；"
+                "這一道看的是「這個進場點是不是現在才出現」。兩者要一起用。"
             ),
         )
         max_age_days = st.slider(
-            "訊號年齡上限（天）", 5, 120, 30, step=5, key="ranking_max_age"
+            "訊號年齡上限（天）", 5, 120, 20, step=5, key="ranking_max_age"
         ) if use_age_filter else None
+        if use_age_filter:
+            st.caption(
+                "設 20 天時，全市場 400 檔實測可用標的：均線交叉 11 檔、MACD 29 檔、ATR 通道突破 11 檔；"
+                "RSI 與布林通道會是 0 檔（均值回歸型訊號幾乎不會出現在 52 週高點附近）。"
+                "列表太短就放寬天數、擴大掃描檔數，或改用觸發較頻繁的 MACD。"
+            )
         scan_clicked = st.button("掃描熱門強勢股排行", key="scan_ranking")
 
         if scan_clicked:
