@@ -14,6 +14,11 @@ import yfinance as yf
 # 讓熱門強勢股掃描可以從真正的全市場挑標的，而不是只掃下面那份手動維護的清單。
 TWSE_DAILY_API = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
 
+# 美股沒有對等的官方免費 API，改用 NASDAQ 的公開選股器端點（約 7,000 檔，含成交量與市值）。
+NASDAQ_SCREENER_API = (
+    "https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=25&download=true"
+)
+
 # 常見股票清單，供下拉選單與熱門強勢股掃描使用；使用者也可以自行輸入代碼。
 POPULAR_TICKERS = {
     "台股": {
@@ -115,6 +120,45 @@ def fetch_twse_universe(top_n: int) -> dict[str, str]:
     ]
     stocks.sort(key=turnover, reverse=True)
     return {f"{r['Code']}.TW": r.get("Name", r["Code"]) for r in stocks[:top_n]}
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def fetch_us_universe(top_n: int) -> dict[str, str]:
+    """從 NASDAQ 公開選股器取得全美股，依「成交金額＝股價 × 成交量」取前 top_n 檔。
+
+    跟台股用成交金額排序的理由相同：內建的 30 檔是知名大型股，不是成交熱絡的股票。
+    排除代碼含 `^` `/` 的特別股與權證，以及股價低於 1 美元的雞蛋水餃股
+    （這類標的買賣價差大、ATR 停損算出來會失真）。
+
+    抓取失敗時回傳空 dict，由呼叫端決定要不要退回內建清單。
+    """
+    try:
+        req = urllib.request.Request(
+            NASDAQ_SCREENER_API,
+            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            rows = json.load(resp)["data"]["rows"]
+    except Exception:
+        return {}
+
+    def parse_money(value: str) -> float:
+        try:
+            return float(str(value).replace("$", "").replace(",", "") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    cleaned = []
+    for r in rows:
+        symbol = (r.get("symbol") or "").strip()
+        price = parse_money(r.get("lastsale"))
+        volume = parse_money(r.get("volume"))
+        if not symbol or "^" in symbol or "/" in symbol or price < 1.0:
+            continue
+        cleaned.append((price * volume, symbol, (r.get("name") or symbol).strip()))
+
+    cleaned.sort(reverse=True)
+    return {sym: name for _, sym, name in cleaned[:top_n]}
 
 
 def normalize_ticker(raw_code: str, market: str) -> str:

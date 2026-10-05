@@ -338,17 +338,18 @@ def render_backtest_page() -> None:
         n_tw = len(data_loader.POPULAR_TICKERS["台股"])
         n_us = len(data_loader.POPULAR_TICKERS["美股"])
         st.caption(
-            f"根據左側目前選擇的策略「{strategy.name}」與參數，分別掃描台股與美股（{n_us} 檔）"
-            f"標的，找出目前有進場訊號的股票。"
+            f"根據左側目前選擇的策略「{strategy.name}」與參數，分別掃描台股與美股，"
+            f"找出目前有進場訊號的股票。"
         )
         universe_mode = st.radio(
-            "台股掃描範圍",
-            ["全市場依成交金額取前 N 檔（推薦）", f"內建精選 {n_tw} 檔（快）"],
+            "掃描範圍（台股與美股皆適用）",
+            ["全市場依成交金額取前 N 檔（推薦）", f"內建精選清單（台股 {n_tw} 檔、美股 {n_us} 檔）"],
             key="ranking_universe_mode",
             help=(
                 "內建清單只有 30 檔、其中 11 檔是金融股與 ETF，彼此高度連動，"
-                "所以掃出來永遠是那幾檔。改用證交所全市場資料依當日成交金額排序，"
-                "「熱門」才名符其實。美股沒有對等的免費全市場 API，仍使用內建清單。"
+                "所以掃出來永遠是那幾檔。改用全市場資料依成交金額排序，「熱門」才名符其實。\n\n"
+                "台股資料來自證交所 OpenAPI（約 1,000 檔普通股），"
+                "美股來自 NASDAQ 公開選股器（約 7,000 檔，已排除特別股、權證與 1 美元以下個股）。"
             ),
         )
         universe_size = None
@@ -357,8 +358,8 @@ def render_backtest_page() -> None:
                 "掃描檔數（依成交金額由高到低）", 100, 600, 400, step=100, key="ranking_universe_size"
             )
             st.caption(
-                "證交所公開 API 每日更新，排除 ETF 與權證後約有 1,000 檔上市普通股。"
-                "掃 400 檔約需 20 秒。"
+                "台股母體約 1,000 檔（證交所），美股約 7,000 檔（NASDAQ）。"
+                "兩邊各掃 400 檔約需 40-60 秒。"
             )
 
         require_bull = st.checkbox(
@@ -464,17 +465,23 @@ def render_backtest_page() -> None:
 
         if scan_clicked:
             params_items = tuple(sorted(params.items()))
-            tw_universe, fell_back = screener.resolve_universe("台股", universe_size)
-            if fell_back:
+            tw_universe, tw_fell_back = screener.resolve_universe("台股", universe_size)
+            us_universe, us_fell_back = screener.resolve_universe("美股", universe_size)
+            if tw_fell_back:
                 st.warning("證交所 API 抓取失敗，台股這次改用內建的 30 檔精選清單。")
-            with st.spinner(f"掃描中，台股 {len(tw_universe)} 檔 + 美股 {n_us} 檔，請稍候..."):
+            if us_fell_back:
+                st.warning("NASDAQ API 抓取失敗，美股這次改用內建的 30 檔精選清單。")
+            with st.spinner(f"掃描中，台股 {len(tw_universe)} 檔 + 美股 {len(us_universe)} 檔，請稍候..."):
                 st.session_state["ranking_result"] = {
                     "strategy_name": strategy.name,
                     "台股掃描檔數": len(tw_universe),
+                    "美股掃描檔數": len(us_universe),
                     "台股": screener.scan_market(
                         "台股", strategy_key, params_items, start_date, end_date, universe_size=universe_size
                     ),
-                    "美股": screener.scan_market("美股", strategy_key, params_items, start_date, end_date),
+                    "美股": screener.scan_market(
+                        "美股", strategy_key, params_items, start_date, end_date, universe_size=universe_size
+                    ),
                 }
 
         ranking_state = st.session_state.get("ranking_result")
@@ -489,7 +496,8 @@ def render_backtest_page() -> None:
                 sort_key = "strength"
             st.caption(
                 f"掃描時使用的策略：{ranking_state['strategy_name']}"
-                f"（台股掃了 {ranking_state.get('台股掃描檔數', n_tw)} 檔）"
+                f"（台股掃了 {ranking_state.get('台股掃描檔數', n_tw)} 檔、"
+                f"美股掃了 {ranking_state.get('美股掃描檔數', n_us)} 檔）"
             )
             for rank_market in ["台股", "美股"]:
                 st.markdown(f"**{rank_market}**")

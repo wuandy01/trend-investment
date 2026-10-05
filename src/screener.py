@@ -134,14 +134,20 @@ def _latest_signal(df: pd.DataFrame, strategy: strategies_module.Strategy, param
 def resolve_universe(market: str, universe_size: int | None) -> tuple[dict[str, str], bool]:
     """決定要掃哪些股票。回傳 (股票池, 是否已退回內建清單)。
 
-    universe_size 為 None 時用內建的精選清單；台股給定數字時改抓證交所全市場、
-    依成交金額取前 N 檔。美股沒有對等的免費全市場 API，一律用內建清單。
+    universe_size 為 None 時用內建的精選清單；給定數字時改抓全市場、依成交金額取前 N 檔
+    （台股用證交所 OpenAPI，美股用 NASDAQ 公開選股器）。抓取失敗則退回內建清單。
     """
     fallback = data_loader.POPULAR_TICKERS.get(market, {})
-    if market != "台股" or not universe_size:
+    if not universe_size:
         return fallback, False
 
-    universe = data_loader.fetch_twse_universe(universe_size)
+    if market == "台股":
+        universe = data_loader.fetch_twse_universe(universe_size)
+    elif market == "美股":
+        universe = data_loader.fetch_us_universe(universe_size)
+    else:
+        return fallback, False
+
     if not universe:
         return fallback, True
     return universe, False
@@ -230,13 +236,15 @@ def rank_signals(
         stats["大盤空頭濾掉"] = int((~keep).sum())
         filtered = filtered[keep]
 
+    # NaN 代表資料不足以判斷（例如上市未滿半年），不能視為通過——否則新上市股會
+    # 繞過強弱與位置這兩道濾網直接進榜。
     if min_rs is not None and "相對強弱" in filtered.columns and not filtered.empty:
-        keep = filtered["相對強弱"].isna() | (filtered["相對強弱"] >= min_rs)
+        keep = filtered["相對強弱"].notna() & (filtered["相對強弱"] >= min_rs)
         stats["不夠強濾掉"] = int((~keep).sum())
         filtered = filtered[keep]
 
     if max_below_high is not None and "距52週高" in filtered.columns and not filtered.empty:
-        keep = filtered["距52週高"].isna() | (filtered["距52週高"] >= -max_below_high)
+        keep = filtered["距52週高"].notna() & (filtered["距52週高"] >= -max_below_high)
         stats["離高點太遠濾掉"] = int((~keep).sum())
         filtered = filtered[keep]
 
