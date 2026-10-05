@@ -768,8 +768,12 @@ def render_trade_planner_page() -> None:
             )
             st.caption(trade_planner.STRUCTURAL_EXITS[structural_exit]["說明"])
             min_profit_n = st.slider(
-                "獲利達幾個 N 才啟動停利", 0.0, 2.0, 1.0, step=0.5, key="planner_min_profit_n",
-                help="進場後的正常震盪很容易立刻觸發結構訊號。實測要求先獲利 1N 才啟動，平均 R 從 +0.43 提升到 +0.47。",
+                "獲利達幾個 N 才啟動停利", 0.0, 6.0, 3.0, step=0.5, key="planner_min_profit_n",
+                help=(
+                    "進場後的築底震盪很容易立刻觸發結構訊號，門檻太低會在主升段開始前就出場。"
+                    "實測 5,314 筆：門檻 1N 平均 +0.861R、3N 平均 +1.012R，但勝率從 33.4% 降到 28.2%。"
+                    "再往上調 R 還會繼續升（不設停利可到 +2.6R），但勝率會掉到 21%，實務上很難執行。"
+                ),
             )
         else:
             target_mult = st.slider(
@@ -1058,7 +1062,7 @@ def render_strength_test_page() -> None:
             )
             st.caption(trade_planner.STRUCTURAL_EXITS[structural_exit]["說明"])
             min_profit_n = st.slider(
-                "獲利達幾個 N 才啟動停利", 0.0, 2.0, 1.0, step=0.5, key="strength_min_profit_n"
+                "獲利達幾個 N 才啟動停利", 0.0, 6.0, 3.0, step=0.5, key="strength_min_profit_n"
             )
         else:
             target_mult = st.slider(

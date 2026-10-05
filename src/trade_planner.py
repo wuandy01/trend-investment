@@ -112,13 +112,23 @@ def check_structural_outcome(
     stop_price: float,
     exit_key: str,
     atr_value: float,
-    min_profit_n: float = 1.0,
+    min_profit_n: float = 3.0,
     max_hold_days: int | None = None,
 ) -> dict:
     """停損用固定價位（處理「看錯了」），停利用結構訊號（處理「這段走完了」）。
 
-    min_profit_n：獲利達到幾個 N 之後才讓結構停利生效。進場後的正常震盪很容易
-    立刻觸發結構訊號，實測要求先獲利 1N 才啟動，平均 R 從 +0.43 提升到 +0.47。
+    min_profit_n：獲利達到幾個 N 之後才讓結構停利生效。進場後的築底震盪很容易
+    立刻觸發結構訊號，門檻太低會在主升段開始前就出場。實測 5,314 筆（2N 停損、
+    跌破 50 日均線停利、12 個月上限）：
+
+        門檻 0N → 平均 +0.737R、勝率 39.6%
+        門檻 1N → 平均 +0.861R、勝率 33.4%
+        門檻 3N → 平均 +1.012R、勝率 28.2%   ← 預設
+        不設停利 → 平均 +2.587R、勝率 21.5%
+
+    R 一路單調上升到「不設停利」，但勝率會掉到五筆輸四筆，實務上難以執行；
+    而且樣本期間（2021-2026 台股）多頭佔絕大部分，任何「抱更久」的規則都會佔便宜。
+    3N 是在這之間取的折衷，不是數據上的最佳解。
     """
     rule = STRUCTURAL_EXITS.get(exit_key)
     if rule is None:
@@ -415,7 +425,7 @@ def evaluate_trade_log(
             outcome = check_structural_outcome(
                 df, entry_date, entry_price, stop_price, exit_style,
                 float(n_atr) if pd.notna(n_atr) else 0.0,
-                min_profit_n=1.0, max_hold_days=max_hold_days,
+                max_hold_days=max_hold_days,
             )
         else:
             outcome = check_bracket_outcome(
