@@ -3,8 +3,12 @@
   "configurations": [
     {
       "name": "trend-investment-app",
-      "runtimeExecutable": "venv/bin/python",
-      "runtimeArgs": ["-m", "streamlit", "run", "app.py", "--server.port", "8503"],
+      "runtimeExecutable": "./venv/bin/python",
+      "runtimeArgs": [
+        "-m", "streamlit", "run", "app.py",
+        "--server.port", "8503",
+        "--server.headless", "true"
+      ],
       "port": 8503
     }
   ]

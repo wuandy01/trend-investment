@@ -254,9 +254,10 @@ def rank_signals(
         stats["離高點太遠濾掉"] = int((~keep).sum())
         filtered = filtered[keep]
 
-    # 乖離率濾網保留但預設不啟用——實測越延伸表現越好，刻意限制反而挑到動能衰退的。
+    # 只擋上方的追高，不擋跌破均線的（那是「距52週高」那道濾網的事）。
+    # 原本寫成 abs() 會把「低於均線」和「略高於均線」兩群完全不同的股票混在一起。
     if max_extension is not None and "乖離率" in filtered.columns and not filtered.empty:
-        keep = filtered["乖離率"].isna() | (filtered["乖離率"].abs() <= max_extension)
+        keep = filtered["乖離率"].notna() & (filtered["乖離率"] <= max_extension)
         stats["追高濾掉"] = int((~keep).sum())
         filtered = filtered[keep]
 

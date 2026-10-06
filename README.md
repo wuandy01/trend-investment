@@ -36,7 +36,9 @@ These are findings from running the tool, not features:
 
 The strict filter also removes valid long entries after normal pullbacks. Conclusion recorded in the docs: no setting is universally better; the simple filter is the better default, the strict filter suits a more conservative, lower-frequency posture.
 
-**Stop-loss / take-profit sweep (Taiwan equities, MA cross 20/60, 2023–2026).** Across 194 historical entry signals, the best combination was 3.0N / 6.0N (avg +4.29%, 53.8% win rate), with a consistent trend that wider stops produced higher average returns. This independently corroborated an earlier manual finding that a 2N stop is too tight for some tickers and gets shaken out by normal pullbacks.
+**Stop-loss / take-profit sweep (Taiwan equities, MA cross 20/60, 2023–2026).** Across 194 historical entry signals, the best combination appeared to be 3.0N / 6.0N (avg +4.29%, 53.8% win rate), with a consistent trend that wider stops produced higher average returns.
+
+**That result was an artifact of the scoring metric, and has since been overturned.** Ranking by average percent return systematically favours wide stops, because a wider stop should shrink the position proportionally and percent return never reflects that. Re-run on 5,317 signals in R-multiples (profit ÷ initial risk), 2N is the interior optimum — R falls off on both sides. The parameter-sweep tab still scores by percent return and is kept for its relative shape, not its argmax. Current rules and evidence live in [docs/trading-rules.md](docs/trading-rules.md).
 
 **Holding-period distribution.** The fixed stop/target planner has no time dimension, so a position can sit unresolved indefinitely. Measuring TSMC over three years (fixed 2N/5N, entering every 15 trading days): median resolution was 18 days, but 35% of trades took over 30 days and 8% took over 60. The 30-day timeout warning default was chosen from this distribution rather than picked arbitrarily.
 

@@ -406,9 +406,9 @@ def render_backtest_page() -> None:
             value=True,
             key="ranking_use_high_filter",
             help=(
-                "實測中最強的單一篩選指標。在半年報酬前 30% 的母體裡，套用實際交易規則後，"
-                "距高點 3% 以內平均 +1.491R、低於高點 10~25% 只有 +0.569R、低於 25% 以上只有 +0.388R。"
-                "「還有續漲空間」的實際樣貌是正在創新高，不是回檔整理。"
+                "實測中最強的單一篩選指標。在半年報酬前 30% 的母體裡，套用目前的出場設定後，"
+                "低於高點 3～10% 平均 +0.341R、10～25% 是 +0.250R、低於 25% 以上只有 +0.148R。"
+                "「離高點越近越好」成立，但不要收到 10% 以下（見下方說明）。"
             ),
         )
         max_below_high = None
@@ -418,26 +418,30 @@ def render_backtest_page() -> None:
                 "距 52 週高點最多低於（%）", 2, 30, 10, step=1, key="ranking_max_below_high"
             ) / 100
             st.caption(
-                "設 10% 代表只保留「現價在 52 週高點 10% 以內」的股票。設 3% 會只剩正在創新高的，"
-                "數量少但實測表現最好。"
+                "設 10% 代表只保留「現價在 52 週高點 10% 以內」的股票。"
+                "⚠️ 不建議收到 10% 以下：實測在目前的出場設定（跌破 10 日 EMA）下，"
+                "最好的一群是「低於高點 3～10%」（+0.341R、勝率 52.8%），"
+                "而「距高點 3% 內」反而只有 +0.270R、勝率 41.8%（全場最低）——"
+                "剛創新高的波動最大，快速出場會一直被洗掉。"
             )
 
         use_extension_filter = st.checkbox(
-            "排除短線追高（乖離率濾網，不建議開啟）",
-            value=False,
+            "排除極端追高（乖離率濾網）",
+            value=True,
             key="ranking_use_extension_filter",
             help=(
-                f"乖離率＝現價距離 {screener.EXTENSION_MA} 日均線多遠。"
-                "⚠️ 實測顯示這道濾網幫倒忙：越延伸的未來表現越好（高於 20MA 20% 以上 +1.087R、"
-                "高於 0~8% 只有 +0.907R、低於 20MA 更只有 +0.427R）。動能是「買高、賣更高」，"
-                "刻意挑回檔等於挑動能正在衰退的那一群。保留這個選項只是為了讓你自己比較。"
+                f"乖離率＝現價高出 {screener.EXTENSION_MA} 日均線多少。這道濾網只擋極端值，"
+                "不要調到 10% 以下——實測 5,317 筆（跌破 10 日 EMA 停利）各組差異不大："
+                "高於 20MA 0～5% +0.279R、5～10% +0.215R、10～20% +0.278R，"
+                "唯獨「高於 20% 以上」掉到 +0.065R（只佔 4% 的訊號）。"
+                "擋掉那一小撮就好，收得太緊會把正常的動能股一起濾掉。"
             ),
         )
         max_extension = None
         if use_extension_filter:
             max_extension = st.slider(
-                f"乖離率上限（%，距 {screener.EXTENSION_MA} 日均線）",
-                2, 30, 8, step=1, key="ranking_max_extension",
+                f"乖離率上限（%，高出 {screener.EXTENSION_MA} 日均線）",
+                10, 40, 20, step=1, key="ranking_max_extension",
             ) / 100
         max_runup = None
 
@@ -574,11 +578,12 @@ def render_backtest_page() -> None:
                 "1. **「進場價格」不是你的買入價**。那是訊號觸發當天的收盤價，你是用「現價」買。"
                 "「訊號後漲幅」就是你已經錯過的幅度——超過 15-20% 代表要用高出訊號價兩成的價格追，"
                 "停損、部位、風報比全都要用現價重算（到「停損停利規劃」頁輸入現價）\n\n"
-                "2. **「距 50MA」決定哪一道出場規則會生效**。50 日均線是結構停利的訊號，"
-                "而 2N 停損的距離通常只有 6% 左右。這個數字超過 20% 時，"
-                "幾乎確定是停損先觸發，結構停利等於沒作用——這不代表不能買，"
-                "實測那一群仍有 +0.851R（最好的 10~20% 區間是 +1.521R），"
-                "但要知道自己實際上只有一道停損在保護"
+                "2. **「距 50MA」是這檔漲得多急的指標**。50 日均線是這波走勢的「地板」，"
+                "而 2N 停損的距離中位數只有 5.7%。這個數字越大，代表你離地板越遠、"
+                "一次回檔就可能掃到停損。實測 5,317 筆（目前的預設出場設定）："
+                "距 50MA 0～5% 是最好的一群（+0.330R、勝率 57.3%），"
+                "5～35% 之間都在 +0.16～0.19R，超過 35% 則轉為負值（-0.106R，樣本僅 39 筆）。"
+                "不是不能買，但位階越高越要用現價重算停損、並把部位縮小"
             )
             if sort_key == "fresh":
                 st.caption(
@@ -781,25 +786,27 @@ def render_trade_planner_page() -> None:
             key="planner_exit_style",
             help=(
                 "固定倍數停利不管股票當下的走勢結構，到價就出；結構停利等技術訊號轉弱才走，"
-                "讓走得動的部位繼續跑。實測台股全市場 5,312 筆訊號，結構停利的平均 R 高於固定倍數。"
+                "讓走得動的部位繼續跑。實測台股全市場 5,317 筆訊號，結構停利的平均 R 高於固定倍數。"
             ),
         )
         target_mult = 5.0
         structural_exit = None
-        min_profit_n = 1.0
+        min_profit_n = 0.0
         if exit_style.startswith("結構"):
+            exit_keys = list(trade_planner.STRUCTURAL_EXITS.keys())
             structural_exit = st.selectbox(
                 "結構停利訊號",
-                list(trade_planner.STRUCTURAL_EXITS.keys()),
+                exit_keys,
+                index=exit_keys.index(trade_planner.DEFAULT_STRUCTURAL_EXIT),
                 key="planner_structural_exit",
             )
             st.caption(trade_planner.STRUCTURAL_EXITS[structural_exit]["說明"])
             min_profit_n = st.slider(
-                "獲利達幾個 N 才啟動停利", 0.0, 6.0, 3.0, step=0.5, key="planner_min_profit_n",
+                "獲利達幾個 N 才啟動停利", 0.0, 6.0, 0.0, step=0.5, key="planner_min_profit_n",
                 help=(
-                    "進場後的築底震盪很容易立刻觸發結構訊號，門檻太低會在主升段開始前就出場。"
-                    "實測 5,314 筆：門檻 1N 平均 +0.861R、3N 平均 +1.012R，但勝率從 33.4% 降到 28.2%。"
-                    "再往上調 R 還會繼續升（不設停利可到 +2.6R），但勝率會掉到 21%，實務上很難執行。"
+                    "門檻拉高等於強迫部位多抱一段：平均 R 會上升，但勝率下降、連續虧損期拉長。"
+                    "實測 5,317 筆（跌破 10 日 EMA 停利）：0N 平均 +0.241R、勝率 53.0%、最大連虧 15 次；"
+                    "2N 平均 +0.391R、勝率 37.3%、最大連虧 76 次。R 多賺六成，代價是連虧期變五倍。"
                 ),
             )
         else:
@@ -812,11 +819,11 @@ def render_trade_planner_page() -> None:
         max_hold_days = None
         if use_hold_limit:
             max_hold_days = st.slider(
-                "持有天數上限（天，僅提醒不會自動出場）", 30, 420, 365, step=15, key="planner_max_hold_days",
+                "持有天數上限（天，僅提醒不會自動出場）", 30, 420, 90, step=15, key="planner_max_hold_days",
                 help=(
-                    "預設 365 天，刻意設得很長：結構停利已經負責「這段走完了」，96% 的部位會自然出場，"
-                    "時間上限只會綁到最強的那幾檔。實測把上限從 3 個月放寬到 12 個月，"
-                    "平均 R 從 +0.525 提升到 +0.860，而平均持有只從 28 天變成 33 天。"
+                    "預設 90 天。搭配 10 日 EMA 停利時這條幾乎用不到——平均 17 天就出場了，"
+                    "實測 90 天與 365 天的結果完全一樣（+0.241R）。它的作用是幫你注意到"
+                    "「這檔卡住三個月了」。但不要調到 30 天，那會砍掉還在走的部位（+0.198R）。"
                 ),
             )
 
@@ -881,10 +888,10 @@ def render_trade_planner_page() -> None:
     row1[2].metric("停損價", f"{currency}{stop_price:,.2f}")
     if structural_exit:
         row1[3].metric("停利方式", structural_exit)
+        gate_note = f"（獲利需先達 {min_profit_n:.1f}N 才啟動）" if min_profit_n > 0 else "（不設啟動門檻）"
         st.caption(
             f"停損距離 {stop_mult:.1f}N＝{currency}{entry_price - stop_price:,.2f}；"
-            f"停利沒有固定價位，等「{structural_exit}」出現才出場"
-            f"（獲利需先達 {min_profit_n:.1f}N 才啟動）。"
+            f"停利沒有固定價位，等「{structural_exit}」出現才出場{gate_note}。"
         )
     else:
         row1[3].metric("停利價", f"{currency}{target_price:,.2f}")
@@ -1080,16 +1087,18 @@ def render_strength_test_page() -> None:
         )
         target_mult = 5.0
         structural_exit = None
-        min_profit_n = 1.0
+        min_profit_n = 0.0
         if exit_style.startswith("結構"):
+            exit_keys = list(trade_planner.STRUCTURAL_EXITS.keys())
             structural_exit = st.selectbox(
                 "結構停利訊號",
-                list(trade_planner.STRUCTURAL_EXITS.keys()),
+                exit_keys,
+                index=exit_keys.index(trade_planner.DEFAULT_STRUCTURAL_EXIT),
                 key="strength_structural_exit",
             )
             st.caption(trade_planner.STRUCTURAL_EXITS[structural_exit]["說明"])
             min_profit_n = st.slider(
-                "獲利達幾個 N 才啟動停利", 0.0, 6.0, 3.0, step=0.5, key="strength_min_profit_n"
+                "獲利達幾個 N 才啟動停利", 0.0, 6.0, 0.0, step=0.5, key="strength_min_profit_n"
             )
         else:
             target_mult = st.slider(
@@ -1100,7 +1109,7 @@ def render_strength_test_page() -> None:
         max_hold_days = None
         if use_hold_limit:
             max_hold_days = st.slider(
-                "持有天數上限（天，僅提醒不會自動出場）", 30, 420, 365, step=15, key="strength_max_hold_days"
+                "持有天數上限（天，僅提醒不會自動出場）", 30, 420, 90, step=15, key="strength_max_hold_days"
             )
 
     tab_watchlist, tab_scan = st.tabs(["清單測試", "參數掃描"])
@@ -1120,7 +1129,7 @@ def _render_watchlist_test_tab(
     target_mult: float,
     max_hold_days: int | None,
     structural_exit: str | None = None,
-    min_profit_n: float = 1.0,
+    min_profit_n: float = 0.0,
 ) -> None:
     watchlist = st.session_state.get("strength_test_watchlist", {})
 
@@ -1295,7 +1304,7 @@ def _render_strength_detail_chart(
     if structural_exit:
         outcome = trade_planner.check_structural_outcome(
             price_df, entry_date, entry_price, stop_price, structural_exit,
-            float(row["N (ATR)"]), min_profit_n=float(row.get("_min_profit_n", 1.0)),
+            float(row["N (ATR)"]), min_profit_n=float(row.get("_min_profit_n", 0.0)),
             max_hold_days=max_hold_days,
         )
     else:
@@ -1456,7 +1465,7 @@ def render_position_page() -> None:
         max_hold_days = None
         if use_hold_limit:
             max_hold_days = st.slider(
-                "持有天數上限（天）", 30, 420, 365, step=15, key="position_max_hold_days"
+                "持有天數上限（天）", 30, 420, 90, step=15, key="position_max_hold_days"
             )
 
     log = trade_planner.load_trade_log()
