@@ -49,31 +49,47 @@ def format_metric(key: str, value) -> str:
     return str(value)
 
 
+# 百分比欄位一律保留成「數字」，顯示格式交給 st.column_config。
+# 早期版本直接把它們轉成 "+9.7%" 這種字串，結果表頭排序變成字典序：
+# 降冪會排出 +9.7% > +8.6% > +24.1% > +18.2%，而「距52週高」更慘——
+# 降冪會把離高點最遠的排到最前面，跟這一欄的用途完全相反。
+RANKING_PCT_COLUMNS = {
+    "訊號前漲幅": "%+.1f%%",
+    "訊號後漲幅": "%+.2f%%",
+    "乖離率": "%+.1f%%",
+    "距52週高": "%+.1f%%",
+    "距50MA": "%+.1f%%",
+    "距10EMA": "%+.1f%%",
+    "半年報酬": "%+.1f%%",
+}
+
+
 def format_ranking_table(df):
     display = df.copy()
-    display["訊號後漲幅"] = (display["訊號後漲幅"] * 100).round(2).astype(str) + "%"
-    for col, fmt in [
-        ("訊號前漲幅", "{:.1f}%"),
-        ("乖離率", "{:+.1f}%"),
-        ("距52週高", "{:+.1f}%"),
-        ("距50MA", "{:+.1f}%"),
-        ("半年報酬", "{:+.1f}%"),
-        ("相對強弱", "前 {:.0f}%"),
-    ]:
-        if col not in display.columns:
-            continue
-        if col == "相對強弱":
-            display[col] = display[col].apply(
-                lambda v: fmt.format((1 - v) * 100) if pd.notna(v) else "N/A"
-            )
-        else:
-            display[col] = display[col].apply(
-                lambda v, f=fmt: f.format(v * 100) if pd.notna(v) else "N/A"
-            )
+    for col in RANKING_PCT_COLUMNS:
+        if col in display.columns:
+            display[col] = pd.to_numeric(display[col], errors="coerce") * 100
+    if "相對強弱" in display.columns:
+        # 存成「前 N%」的 N：數字越小越強，排序才跟直覺一致。
+        display["相對強弱"] = (1 - pd.to_numeric(display["相對強弱"], errors="coerce")) * 100
     display["進場日期"] = display["進場日期"].dt.date
     display["現價"] = display["現價"].round(2)
     display["進場價格"] = display["進場價格"].round(2)
     return display
+
+
+def ranking_column_config(df) -> dict:
+    """百分比欄位的顯示格式；數值本身保持 float，表頭排序才會照數字大小。"""
+    config = {
+        col: st.column_config.NumberColumn(col, format=fmt)
+        for col, fmt in RANKING_PCT_COLUMNS.items()
+        if col in df.columns
+    }
+    if "相對強弱" in df.columns:
+        config["相對強弱"] = st.column_config.NumberColumn(
+            "相對強弱", format="前 %.0f%%", help="數字越小越強（前 10% 強於前 30%）"
+        )
+    return config
 
 
 # 觸發出場訊號的標的要一眼看得出來，不然清單一長就得逐列核對「狀態」欄位。
@@ -546,7 +562,8 @@ def render_backtest_page() -> None:
                         column_config={
                             "加入強勢股測試": st.column_config.CheckboxColumn(
                                 "加入強勢股測試", help="勾選後按下方按鈕，送到「強勢股測試」頁面批次跑停損停利模擬"
-                            )
+                            ),
+                            **ranking_column_config(display_df),
                         },
                         disabled=[c for c in display_df.columns if c != "加入強勢股測試"],
                         hide_index=True,
@@ -574,7 +591,7 @@ def render_backtest_page() -> None:
                                 }
                             st.success(f"已加入 {len(selected_idx)} 檔到「強勢股測試」清單，可切換到左側「強勢股測試」頁面查看。")
             st.info(
-                "**看這張表要注意兩件事**\n\n"
+                "**看這張表要注意三件事**\n\n"
                 "1. **「進場價格」不是你的買入價**。那是訊號觸發當天的收盤價，你是用「現價」買。"
                 "「訊號後漲幅」就是你已經錯過的幅度——超過 15-20% 代表要用高出訊號價兩成的價格追，"
                 "停損、部位、風報比全都要用現價重算（到「停損停利規劃」頁輸入現價）\n\n"
@@ -583,7 +600,13 @@ def render_backtest_page() -> None:
                 "一次回檔就可能掃到停損。實測 5,317 筆（目前的預設出場設定）："
                 "距 50MA 0～5% 是最好的一群（+0.330R、勝率 57.3%），"
                 "5～35% 之間都在 +0.16～0.19R，超過 35% 則轉為負值（-0.106R，樣本僅 39 筆）。"
-                "不是不能買，但位階越高越要用現價重算停損、並把部位縮小"
+                "不是不能買，但位階越高越要用現價重算停損、並把部位縮小\n\n"
+                "3. **「距 10EMA」告訴你停利上膛了沒**。停利條件是「收盤跌破 10 日 EMA "
+                "**且** 收盤在進場價之上」。當現價高出 10 日 EMA 超過一個停損距離（2N，"
+                "中位數 5.7%）時，這兩個條件在數學上無法同時成立——"
+                "**停利等於還沒上膛，那段期間只有停損在保護你**，要等股價再走一段、"
+                "把 EMA 拉上來才會生效。這一欄在 2% 以內代表兩道出場規則都在作用；"
+                "超過 5% 代表你買的是剛急拉過的位置，勝負幾乎只看會不會立刻回檔"
             )
             if sort_key == "fresh":
                 st.caption(

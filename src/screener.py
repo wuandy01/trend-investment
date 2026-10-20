@@ -27,9 +27,15 @@ RS_LOOKBACK = 120
 EXTENSION_MA = 20
 HIGH_LOOKBACK = 250
 
-# 結構停利用的均線天數，跟 trade_planner 的「跌破 50 日均線」一致。
-# 「距 50MA」＝買進後到系統叫你出場之間還有多少緩衝空間。
+# 「距 50MA」＝這一波漲得多急，50 日均線是這段走勢的「地板」。
 EXIT_MA = 50
+
+# 現行預設停利訊號用的均線（跟 trade_planner 的「跌破 10 日 EMA」一致）。
+# 「距10EMA」是判斷「這筆交易實際上有幾道保護」的欄位：停利條件是
+# 「收盤跌破 10 日 EMA 且收盤在進場價之上」，所以當現價高出 10 日 EMA
+# 超過一個停損距離（2N）時，兩個條件無法同時成立——停利等於還沒上膛，
+# 那段期間只有停損在保護。數字越小代表停利越快能生效。
+PROFIT_EXIT_EMA = 10
 
 # 大盤環境濾網：指數與判斷用的均線天數。
 MARKET_INDEX = {"台股": "^TWII", "美股": "^GSPC"}
@@ -62,14 +68,18 @@ def _strength_metrics(price_data: dict[str, pd.DataFrame]) -> pd.DataFrame:
     常常是剛好穿越均線的牛皮股，跟強勢無關。
 
     距52週高＝現價相對過去一年最高價的距離（0 代表正在創新高，-0.2 代表比高點低 20%）。
-    這是實測中最強的單一篩選指標：在半年報酬前 30% 的母體裡，套用實際交易規則
-    （2N 停損 + 跌破 50MA 停利）後，距高點 3% 以內的平均 +1.491R，
-    低於高點 25% 以上的只有 +0.388R，差距接近四倍。
+    這是實測中最強的單一篩選指標。在半年報酬前 30% 的母體裡，套用現行出場規則
+    （2N 停損 + 跌破 10 日 EMA）後：低於高點 3~10% 最好（+0.341R、勝率 52.8%）、
+    10~25% 是 +0.250R、低於 25% 以上只有 +0.148R。注意「距高點 3% 內」反而是
+    勝率最低的一群（41.8%）——剛創新高波動最大，快速出場會一直被洗掉，
+    所以濾網設 10%、不要再收緊。
 
-    乖離率＝現價相對 EXTENSION_MA 日均線的距離，保留為參考欄位。原本用它當「不追高」
-    的濾網是錯的——實測越延伸的未來表現越好（高於 20MA 20% 以上 +1.087R，
-    高於 0~8% 只有 +0.907R，低於 20MA 更只有 +0.427R）。動能的經驗法則是
-    「買高、賣更高」，刻意挑回檔的等於挑動能正在衰退的那一群。
+    乖離率＝現價相對 EXTENSION_MA 日均線的距離。原本用它當「不追高」的濾網是錯的，
+    現在只拿來擋極端值：實測 0~20% 之間差異不大（+0.215 ~ +0.279R），
+    但高於 20% 以上掉到 +0.065R。動能的經驗法則是「買高、賣更高」，
+    刻意挑回檔等於挑動能正在衰退的那一群，所以濾網上限設在 20% 而不是 8%。
+
+    距10EMA＝現價高出 10 日 EMA 多少，用來看停利規則上膛了沒（見 PROFIT_EXIT_EMA）。
     """
     rows = []
     for ticker, df in price_data.items():
@@ -82,15 +92,19 @@ def _strength_metrics(price_data: dict[str, pd.DataFrame]) -> pd.DataFrame:
             continue
         year_high = float(df["High"].iloc[-HIGH_LOOKBACK:].max())
         exit_ma = close.rolling(EXIT_MA).mean().iloc[-1]
+        profit_ema = close.ewm(span=PROFIT_EXIT_EMA).mean().iloc[-1]
         rows.append({
             "代碼": ticker,
             "半年報酬": close.iloc[-1] / past - 1,
             "乖離率": close.iloc[-1] / ma - 1,
             "距52週高": close.iloc[-1] / year_high - 1 if year_high > 0 else float("nan"),
             "距50MA": close.iloc[-1] / exit_ma - 1 if exit_ma == exit_ma and exit_ma > 0 else float("nan"),
+            "距10EMA": close.iloc[-1] / profit_ema - 1 if profit_ema == profit_ema and profit_ema > 0 else float("nan"),
         })
     if not rows:
-        return pd.DataFrame(columns=["代碼", "半年報酬", "乖離率", "距52週高", "距50MA", "相對強弱"])
+        return pd.DataFrame(
+            columns=["代碼", "半年報酬", "乖離率", "距52週高", "距50MA", "距10EMA", "相對強弱"]
+        )
 
     metrics = pd.DataFrame(rows)
     metrics["相對強弱"] = metrics["半年報酬"].rank(pct=True)
