@@ -41,7 +41,7 @@
   - 三道濾網套用後的實測對比（均線交叉、漲幅上限 20%、年齡上限 30 天）：內建 30 檔只剩 3 檔（廣達、中華電、中信金——都是老面孔）；全市場 300 檔有 10 檔，其中致伸（1 天）、聯陽（8 天）、聯強（9 天）、中石化（10 天）等都是原本看不到的標的
 - **財務數據**：Yahoo Finance 基本面——公司資訊、關鍵比率（P/E、P/B、ROE、毛利率等）、三大財報（損益表／資產負債表／現金流量表，近 5 年）、分析師評等與目標價
 
-> 富途牛牛 (Futu) 沒有公開 API，需要本機安裝並登入 OpenD 閘道才能串接，部署到雲端後會失效，因此本專案的財務數據**只採用 Yahoo Finance**。
+> 本專案的財務數據**只採用 Yahoo Finance**。
 
 ## 功能：海龜交易法則 (Turtle Trading Rules)
 
@@ -95,23 +95,6 @@
 - ⚠️ 這個分頁用「平均報酬率 %」評分，會**系統性偏袒寬停損**（停損拉寬時部位應該等比例縮小，報酬率% 沒有反映這件事）。早期據此得出的「3.0N/6.0N 最好」結論已被 5,317 筆的 R 倍數實測推翻，正確答案是 2N（見 [docs/trading-rules.md](docs/trading-rules.md)）。把這張熱力圖當成相對形狀的參考，不要直接照抄最高的格子
 - 這是歷史模擬結果，不代表未來績效，也有過度配適風險——建議挑熱力圖上鄰近格子表現都不錯的區域，而不是單一個數字最高的孤立格子
 
-## 功能：X KOL 動態
-
-- 讀取使用者提供、公開分享的 [Google Sheet KOL 名單](https://docs.google.com/spreadsheets/d/1GByalwK-RUT0p4_ydFsTydHeun6Wwo825C5XyILm3IM)（姓名／連結／簡介／粉絲數），以公開 CSV 匯出網址讀取，不需金鑰
-- 設定 X API Bearer Token 後，可選擇特定 KOL 抓取最新貼文（見下方「設定 X API 金鑰」）
-- **不會做未經授權的爬蟲**：X 對非官方存取的防爬機制很嚴格，本專案只走官方 X API v2，沒有金鑰就只顯示名單、不抓貼文
-
-### 設定 X API 金鑰
-
-1. 到 [developer.x.com](https://developer.x.com) 申請開發者帳號，取得 Bearer Token（注意：有意義的讀取量通常需要付費方案，免費額度非常有限，請以官網當下公告的方案為準）
-2. 複製 `.streamlit/secrets.toml.example` 為 `.streamlit/secrets.toml`，填入：
-   ```toml
-   [x_api]
-   bearer_token = "你的 token"
-   ```
-3. `secrets.toml` 已加入 `.gitignore`，不會被提交進版本控制
-4. 部署到 Streamlit Community Cloud 時，改到該 App 的 **Settings → Secrets** 貼上同樣內容
-
 ## 專案結構
 
 ```
@@ -152,7 +135,7 @@ streamlit run app.py
 
 啟動後瀏覽器會自動開啟（預設 `http://localhost:8501`，可用 `--server.port` 指定其他埠號）。
 
-## 部署到 Streamlit Community Cloud（免費）
+## 部署到 Streamlit Community Cloud
 
 1. 把整個專案推上 GitHub（可以是 public repo）
 2. 到 [share.streamlit.io](https://share.streamlit.io) 用 GitHub 帳號登入
@@ -180,4 +163,3 @@ streamlit run app.py
 - 交易明細顯示的報酬率為進出場價格的原始報酬（未扣成本），整體績效指標（總報酬率、CAGR 等）已計入交易成本
 - 熱門強勢股排行採批次下載（`yfinance` 多代碼一次請求）以加速掃描，「訊號後漲幅」＝該股票目前策略訊號觸發進場那天至今的價格漲幅，只有目前正處於進場訊號中的股票才會列入排行
 - 財務數據的三大財報只挑常用項目顯示（避免資訊過載），數字自動換算成萬／億／兆
-- X KOL 名單透過 Google Sheet 的公開 CSV 匯出網址讀取（`.../export?format=csv&gid=0`），不需要 Google API；抓取貼文需要使用者自行選擇 KOL 並按按鈕才會呼叫 X API，避免每次頁面重整就消耗 API 額度
